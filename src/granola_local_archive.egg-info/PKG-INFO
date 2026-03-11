@@ -1,0 +1,305 @@
+Metadata-Version: 2.4
+Name: granola-local-archive
+Version: 1.0.0
+Summary: Unofficial MCP server and local index for chatting with Granola notes, summaries, and transcripts
+Author: gdebenedetti
+License: MIT License
+        
+        Copyright (c) 2026
+        
+        Permission is hereby granted, free of charge, to any person obtaining a copy
+        of this software and associated documentation files (the "Software"), to deal
+        in the Software without restriction, including without limitation the rights
+        to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+        copies of the Software, and to permit persons to whom the Software is
+        furnished to do so, subject to the following conditions:
+        
+        The above copyright notice and this permission notice shall be included in all
+        copies or substantial portions of the Software.
+        
+        THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+        IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+        FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+        AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+        LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+        OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+        SOFTWARE.
+        
+Classifier: Development Status :: 5 - Production/Stable
+Classifier: Environment :: Console
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Operating System :: MacOS
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Topic :: Utilities
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Dynamic: license-file
+
+# Granola Local Archive
+
+[![Tested in Cursor](https://img.shields.io/badge/Tested%20in-Cursor-111111)](#cursor)
+
+Unofficial project. Not affiliated with, endorsed by, or maintained by Granola.
+
+This project is intended for macOS installations where the Granola desktop app has already written local cache data to disk.
+
+Local MCP server and SQLite-backed index for chatting with Granola-generated notes, summaries, and transcripts already present on the local machine.
+
+## What It Does
+
+- Exposes local Granola content to Codex, Cursor, and other MCP clients so you can ask questions about meetings and folders.
+- Reads local notes, summaries, transcripts, folders, and folder attachments from the Granola cache already on disk.
+- Indexes notes and transcript text in SQLite FTS5 for fast local search.
+- Returns grounded snippets and meeting metadata through MCP tools optimized for date range and folder-scoped queries.
+- Takes compressed snapshots of `~/Library/Application Support/Granola/cache-v4.json` only when it changes.
+- Stores current sidecars plus versioned history for meetings, transcripts, and folders.
+- Generates a daily hydration queue for meetings that still have no local transcript.
+- Preserves already archived meetings even if they later disappear from Granola's live cache.
+
+## Layout
+
+Most runtime state is stored under `archive/`:
+
+- `snapshots/`: gzip snapshots of raw `cache-v4.json`
+- `cold-backups/`: weekly tarballs of the Granola application support directory, excluding ephemeral caches
+- `current/`: current sidecars for meetings, transcripts, and folders
+- `history/`: prior versions of those sidecars
+- `reports/`: daily reconciliation reports
+- `state/`: SQLite index, manifest, and hydrate queue
+
+## Setup
+
+Clean clone bootstrap:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install --upgrade pip setuptools
+.venv/bin/python -m pip install -e . --no-build-isolation
+```
+
+The wrapper scripts below assume `.venv/` exists:
+
+```bash
+zsh ./ops/run-archive.sh stats
+```
+
+Run the first full local sync:
+
+```bash
+zsh ./ops/run-archive.sh sync --mode daily
+```
+
+Cheap hourly check:
+
+```bash
+zsh ./ops/run-archive.sh sync --mode hourly
+```
+
+See the current transcript hydration queue:
+
+```bash
+zsh ./ops/run-archive.sh hydrate-queue
+```
+
+Main use case:
+
+```bash
+zsh ./ops/run-mcp.sh
+```
+
+## Manual Transcript Hydration
+
+Granola appears to fetch some older transcripts on demand and then persist them back into `cache-v4.json`.
+
+Recommended flow:
+
+1. Run `hydrate-queue` and pick 5 to 10 meetings.
+2. Open each meeting in Granola and expand the transcript.
+3. Wait a few seconds for the note to finish hydrating.
+4. Run `sync --mode hourly`.
+5. The new transcript will be detected and archived automatically.
+
+If Granola shows a transcript in the UI but never persists it into `cache-v4.json`, import a copied transcript manually:
+
+```bash
+pbpaste | zsh ./ops/run-archive.sh import-transcript --meeting "Weekly Sync" --created-at 2025-10-08
+```
+
+You can also read from a file:
+
+```bash
+zsh ./ops/run-archive.sh import-transcript --meeting-id meeting-123 --file /tmp/transcript.txt
+```
+
+Manual transcript imports are stored under `archive/manual/transcripts/` and are re-applied on future syncs, so a later cache update will not remove them.
+
+## MCP Usage
+
+Start the local MCP server:
+
+```bash
+zsh ./ops/run-mcp.sh
+```
+
+Available tools:
+
+- `search_meetings`
+- `list_meetings`
+- `get_meeting`
+- `get_meeting_transcript`
+- `list_folders`
+- `get_folder`
+- `search_folder`
+- `search_evidence`
+- `search_unlisted`
+- `get_folder_attachments`
+- `stats`
+
+Recommended usage for grounded answers:
+
+1. `list_meetings` for strict folder/date scoping
+2. `search_evidence` for exact snippets before claiming decisions, people, or next steps
+3. `get_meeting` or `get_meeting_transcript` only when deeper context is needed
+
+Conceptually, the archive layer is there to make the MCP reliable over time. The primary user-facing surface is the MCP server, not the backup job itself.
+
+## Client Setup
+
+### Cursor
+
+```json
+{
+  "mcpServers": {
+    "granola-local": {
+      "command": "/bin/zsh",
+      "args": ["/path/to/granola-local-archive/ops/run-mcp.sh"]
+    }
+  }
+}
+```
+
+Cursor also supports install deeplinks. Because this MCP server runs from your local checkout, a public README cannot ship a universal one-click button with the correct absolute path for every machine.
+
+Generate a local Cursor install link from your clone:
+
+```bash
+.venv/bin/python ./ops/generate-cursor-install-link.py
+```
+
+Open it directly on macOS:
+
+```bash
+open "$(.venv/bin/python ./ops/generate-cursor-install-link.py --raw)"
+```
+
+The helper can also print Markdown for an `Add to Cursor` button if you want to reuse it in your own docs:
+
+```bash
+.venv/bin/python ./ops/generate-cursor-install-link.py --markdown
+```
+
+### Codex
+
+Configure a stdio MCP server that points at the same launcher:
+
+```text
+/bin/zsh /path/to/granola-local-archive/ops/run-mcp.sh
+```
+
+### Claude Code
+
+```bash
+claude mcp add-json granola-local \
+  '{"type":"stdio","command":"/bin/zsh","args":["/path/to/granola-local-archive/ops/run-mcp.sh"]}' \
+  --scope user
+```
+
+### Claude Desktop
+
+Add the server to your Claude Desktop MCP config:
+
+```json
+{
+  "mcpServers": {
+    "granola-local": {
+      "command": "/bin/zsh",
+      "args": ["/path/to/granola-local-archive/ops/run-mcp.sh"],
+      "env": {}
+    }
+  }
+}
+```
+
+### OpenCode
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "granola-local": {
+      "type": "local",
+      "enabled": true,
+      "command": ["/bin/zsh", "/path/to/granola-local-archive/ops/run-mcp.sh"]
+    }
+  }
+}
+```
+
+### ChatGPT
+
+ChatGPT custom connectors currently target remote MCP servers over Streamable HTTP or SSE, not a local stdio process. This project would need a small HTTP adapter before it can be connected directly to ChatGPT.
+
+### Other MCP Clients
+
+Untested stdio clients such as Windsurf or VS Code / GitHub Copilot should work with the same command and args pattern shown above.
+
+## GitHub Agents
+
+This repository ships with custom GitHub Copilot agent profiles under `.github/agents/`:
+
+- `security-review`: checks for privacy, file access, subprocess, MCP exposure, and CI/supply-chain risks
+- `mcp-review`: checks MCP protocol behavior, grounding quality, and tool contract reliability
+- `release-readiness`: checks whether the repository is ready for a public release
+
+Use them from the repository's `Agents` tab on GitHub, or from any GitHub Copilot surface that supports repository custom agents. Select the repository and branch first, then choose the agent and give it a focused task such as:
+
+- `Review this PR for security issues.`
+- `Review the MCP server for protocol or grounding problems.`
+- `Check whether this branch is ready for a public release.`
+
+## launchd Templates
+
+Templates are under `ops/launchd/` and are rendered locally during install:
+
+- hourly sync every 3600 seconds
+- daily reconciliation at 07:30 local time
+
+Use `./ops/manage-launchd.sh` to install or remove them:
+
+```bash
+zsh ./ops/manage-launchd.sh install
+zsh ./ops/manage-launchd.sh status
+zsh ./ops/manage-launchd.sh run-now daily
+zsh ./ops/manage-launchd.sh uninstall
+```
+
+`clear-logs` truncates the archive scheduler logs without touching snapshots or reports.
+
+## Shareable Repo Hygiene
+
+- Runtime data under `archive/` is local state, not project source.
+- macOS installation state under `~/Library/LaunchAgents` is local state, not project source.
+- The project reads optional hydration priority folders from `GRANOLA_PRIORITY_FOLDERS`, for example:
+
+```bash
+export GRANOLA_PRIORITY_FOLDERS="Folder A,Folder B"
+```
+
+- Before publishing, run:
+
+```bash
+zsh ./ops/check-public-hygiene.sh
+```
