@@ -1,5 +1,7 @@
 # Granola Local Archive
 
+[![Tested in Cursor](https://img.shields.io/badge/Tested%20in-Cursor-111111)](#cursor)
+
 Unofficial project. Not affiliated with, endorsed by, or maintained by Granola.
 
 This project is intended for macOS installations where the Granola desktop app has already written local cache data to disk.
@@ -124,7 +126,9 @@ Recommended usage for grounded answers:
 
 Conceptually, the archive layer is there to make the MCP reliable over time. The primary user-facing surface is the MCP server, not the backup job itself.
 
-### Cursor Example
+## Client Setup
+
+### Cursor
 
 ```json
 {
@@ -137,13 +141,80 @@ Conceptually, the archive layer is there to make the MCP reliable over time. The
 }
 ```
 
-### Codex Example
+Cursor also supports install deeplinks. Because this MCP server runs from your local checkout, a public README cannot ship a universal one-click button with the correct absolute path for every machine.
 
-Use the same stdio command:
+Generate a local Cursor install link from your clone:
+
+```bash
+.venv/bin/python ./ops/generate-cursor-install-link.py
+```
+
+Open it directly on macOS:
+
+```bash
+open "$(.venv/bin/python ./ops/generate-cursor-install-link.py --raw)"
+```
+
+The helper can also print Markdown for an `Add to Cursor` button if you want to reuse it in your own docs:
+
+```bash
+.venv/bin/python ./ops/generate-cursor-install-link.py --markdown
+```
+
+### Codex
+
+Configure a stdio MCP server that points at the same launcher:
 
 ```text
 /bin/zsh /path/to/granola-local-archive/ops/run-mcp.sh
 ```
+
+### Claude Code
+
+```bash
+claude mcp add-json granola-local \
+  '{"type":"stdio","command":"/bin/zsh","args":["/path/to/granola-local-archive/ops/run-mcp.sh"]}' \
+  --scope user
+```
+
+### Claude Desktop
+
+Add the server to your Claude Desktop MCP config:
+
+```json
+{
+  "mcpServers": {
+    "granola-local": {
+      "command": "/bin/zsh",
+      "args": ["/path/to/granola-local-archive/ops/run-mcp.sh"],
+      "env": {}
+    }
+  }
+}
+```
+
+### OpenCode
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "granola-local": {
+      "type": "local",
+      "enabled": true,
+      "command": ["/bin/zsh", "/path/to/granola-local-archive/ops/run-mcp.sh"]
+    }
+  }
+}
+```
+
+### ChatGPT
+
+ChatGPT custom connectors currently target remote MCP servers over Streamable HTTP or SSE, not a local stdio process. This project would need a small HTTP adapter before it can be connected directly to ChatGPT.
+
+### Other MCP Clients
+
+Untested stdio clients such as Windsurf or VS Code / GitHub Copilot should work with the same command and args pattern shown above.
 
 ## launchd Templates
 
