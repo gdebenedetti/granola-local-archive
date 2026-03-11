@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import io
 import json
+import tempfile
 import unittest
+from pathlib import Path
 
+from granola_local_archive.config import ArchiveConfig
+from granola_local_archive.index import ArchiveDatabase
 from granola_local_archive.mcp_server import StdioMCPServer
-from granola_local_archive.mcp_server import _validate_date
+from granola_local_archive.mcp_server import ToolRouter
+from granola_local_archive.syncer import SyncService
 
 
 class DummyRouter:
@@ -15,14 +20,43 @@ class DummyRouter:
         return {"name": name, "arguments": arguments or {}}
 
 
-class DateValidatingRouter:
-    """Minimal router that applies the same date validation as ToolRouter."""
+def _write_cache(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
-    def call_tool(self, name, arguments):
-        arguments = arguments or {}
-        _validate_date(arguments.get("date_from"), "date_from")
-        _validate_date(arguments.get("date_to"), "date_to")
-        return {}
+
+def _build_tool_router(project: Path, granola: Path) -> tuple[ToolRouter, ArchiveDatabase]:
+    """Build a minimal archive and return a real ToolRouter backed by it."""
+    cache_path = granola / "cache-v4.json"
+    _write_cache(
+        cache_path,
+        {
+            "cache": {
+                "state": {
+                    "documents": {
+                        "meeting-a": {
+                            "id": "meeting-a",
+                            "title": "Roadmap Review",
+                            "created_at": "2026-03-09T10:00:00Z",
+                            "updated_at": "2026-03-09T10:00:00Z",
+                            "valid_meeting": True,
+                            "transcribe": False,
+                            "notes_markdown": "Roadmap.",
+                        }
+                    },
+                    "transcripts": {},
+                    "documentLists": {},
+                    "documentListsMetadata": {},
+                    "documentListsAttachments": {},
+                    "meetingsMetadata": {},
+                }
+            }
+        },
+    )
+    config = ArchiveConfig.from_project_root(project, granola)
+    SyncService(config).sync(mode="hourly")
+    database = ArchiveDatabase(config)
+    return ToolRouter(config=config, database=database), database
 
 
 class MCPServerTransportTests(unittest.TestCase):
@@ -127,35 +161,40 @@ class MCPServerTransportTests(unittest.TestCase):
         self.assertIn("name", error_text.lower())
 
     def test_invalid_calendar_dates_rejected_via_mcp(self) -> None:
-        """Impossible calendar dates (2026-02-31, 2026-13-01) must be rejected with isError=true."""
-        for bad_date in ("2026-02-31", "2026-13-01", "2025-02-29"):
-            with self.subTest(date=bad_date):
-                input_stream = io.BytesIO(
-                    (
-                        json.dumps(
-                            {
-                                "jsonrpc": "2.0",
-                                "id": 1,
-                                "method": "tools/call",
-                                "params": {
-                                    "name": "list_meetings",
-                                    "arguments": {"date_from": bad_date},
-                                },
-                            }
+        """Impossible calendar dates must be rejected through the real ToolRouter dispatch path."""
+        with tempfile.TemporaryDirectory() as project_root, tempfile.TemporaryDirectory() as granola_root:
+            router, database = _build_tool_router(Path(project_root), Path(granola_root))
+            try:
+                for bad_date in ("2026-02-31", "2026-13-01", "2025-02-29"):
+                    with self.subTest(date=bad_date):
+                        input_stream = io.BytesIO(
+                            (
+                                json.dumps(
+                                    {
+                                        "jsonrpc": "2.0",
+                                        "id": 1,
+                                        "method": "tools/call",
+                                        "params": {
+                                            "name": "list_meetings",
+                                            "arguments": {"date_from": bad_date},
+                                        },
+                                    }
+                                )
+                                + "\n"
+                            ).encode("utf-8")
                         )
-                        + "\n"
-                    ).encode("utf-8")
-                )
-                output_stream = io.BytesIO()
+                        output_stream = io.BytesIO()
 
-                StdioMCPServer(
-                    DateValidatingRouter(),
-                    input_stream=input_stream,
-                    output_stream=output_stream,
-                ).run()
+                        StdioMCPServer(
+                            router,
+                            input_stream=input_stream,
+                            output_stream=output_stream,
+                        ).run()
 
-                response = json.loads(output_stream.getvalue().decode("utf-8").strip())
-                self.assertTrue(response["result"]["isError"])
+                        response = json.loads(output_stream.getvalue().decode("utf-8").strip())
+                        self.assertTrue(response["result"]["isError"])
+            finally:
+                database.close()
 
 
 if __name__ == "__main__":

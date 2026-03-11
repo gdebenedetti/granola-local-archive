@@ -188,9 +188,49 @@ class QueryTests(unittest.TestCase):
             self.assertEqual(transcript["segment_count"], 1)
 
     def test_transcript_preview_includes_truncation_fields(self) -> None:
-        """get_meeting_transcript(full=False) must include is_truncated and full_length."""
+        """get_meeting_transcript(full=False) must set is_truncated=True and full_length>4000
+        when the transcript text exceeds the 4000-char preview window."""
+        # "word " * 801 = 4005 chars; formatted line adds a ~31-char prefix, so full_length > 4000
+        long_text = "word " * 801
+        payload = {
+            "cache": {
+                "state": {
+                    "documents": {
+                        "meeting-a": {
+                            "id": "meeting-a",
+                            "title": "Roadmap Review",
+                            "created_at": "2026-03-09T10:00:00Z",
+                            "updated_at": "2026-03-09T10:00:00Z",
+                            "valid_meeting": True,
+                            "transcribe": False,
+                            "notes_markdown": "Roadmap.",
+                        }
+                    },
+                    "transcripts": {
+                        "meeting-a": [
+                            {
+                                "id": "seg-1",
+                                "document_id": "meeting-a",
+                                "start_timestamp": "2026-03-09T10:01:00Z",
+                                "end_timestamp": "2026-03-09T10:02:00Z",
+                                "text": long_text,
+                                "source": "system",
+                                "is_final": True,
+                            }
+                        ]
+                    },
+                    "documentLists": {"folder-a": ["meeting-a"]},
+                    "documentListsMetadata": {"folder-a": {"id": "folder-a", "title": "Project Alpha"}},
+                    "documentListsAttachments": {},
+                    "meetingsMetadata": {},
+                }
+            }
+        }
         with tempfile.TemporaryDirectory() as project_root, tempfile.TemporaryDirectory() as granola_root:
-            config = _build_archive(Path(project_root), Path(granola_root))
+            cache_path = Path(granola_root) / "cache-v4.json"
+            _write_cache(cache_path, payload)
+            config = ArchiveConfig.from_project_root(Path(project_root), Path(granola_root))
+            SyncService(config).sync(mode="hourly")
             database = ArchiveDatabase(config)
             try:
                 transcript = database.get_meeting_transcript("meeting-a", full=False)
@@ -198,11 +238,9 @@ class QueryTests(unittest.TestCase):
                 database.close()
 
         self.assertTrue(transcript["available"])
-        self.assertIn("is_truncated", transcript)
-        self.assertIn("full_length", transcript)
-        self.assertIsInstance(transcript["is_truncated"], bool)
-        self.assertIsInstance(transcript["full_length"], int)
-        self.assertGreaterEqual(transcript["full_length"], 0)
+        self.assertTrue(transcript["is_truncated"])
+        self.assertGreater(transcript["full_length"], 4000)
+        self.assertEqual(len(transcript["preview"]), 4000)
 
     def test_search_evidence_nonexistent_meeting_raises(self) -> None:
         """search_evidence with a meeting_id that does not exist must raise KeyError."""
