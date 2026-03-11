@@ -216,6 +216,20 @@ ChatGPT custom connectors currently target remote MCP servers over Streamable HT
 
 Untested stdio clients such as Windsurf or VS Code / GitHub Copilot should work with the same command and args pattern shown above.
 
+## GitHub Agents
+
+This repository ships with custom GitHub Copilot agent profiles under `.github/agents/`:
+
+- `security-review`: checks for privacy, file access, subprocess, MCP exposure, and CI/supply-chain risks
+- `mcp-review`: checks MCP protocol behavior, grounding quality, and tool contract reliability
+- `release-readiness`: checks whether the repository is ready for a public release
+
+Use them from the repository's `Agents` tab on GitHub, or from any GitHub Copilot surface that supports repository custom agents. Select the repository and branch first, then choose the agent and give it a focused task such as:
+
+- `Review this PR for security issues.`
+- `Review the MCP server for protocol or grounding problems.`
+- `Check whether this branch is ready for a public release.`
+
 ## launchd Templates
 
 Templates are under `ops/launchd/` and are rendered locally during install:
