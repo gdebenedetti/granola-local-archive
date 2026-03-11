@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-import re
 import sys
 from dataclasses import dataclass
+from datetime import date as _date
 from typing import BinaryIO
 from typing import Any
 
@@ -12,13 +12,15 @@ from .config import ArchiveConfig
 from .index import ArchiveDatabase
 from .storage import load_manifest
 
-_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-
 
 def _validate_date(value: str | None, param_name: str) -> None:
-    """Raise ValueError when *value* is provided but not a valid ISO 8601 date."""
-    if value is not None and not _ISO_DATE_RE.match(value):
-        raise ValueError(f"{param_name} must be an ISO 8601 date (YYYY-MM-DD), got {value!r}")
+    """Raise ValueError when *value* is provided but not a real ISO 8601 calendar date."""
+    if value is None:
+        return
+    try:
+        _date.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"{param_name} must be a real ISO 8601 date (YYYY-MM-DD), got {value!r}")
 
 
 TOOLS = [
