@@ -15,6 +15,62 @@ def _write_cache(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _minimal_cache_payload() -> dict:
+    """Return a minimal Granola cache payload with one foldered meeting (with transcript)
+    and one unlisted meeting (without transcript)."""
+    return {
+        "cache": {
+            "state": {
+                "documents": {
+                    "meeting-a": {
+                        "id": "meeting-a",
+                        "title": "Roadmap Review",
+                        "created_at": "2026-03-09T10:00:00Z",
+                        "updated_at": "2026-03-09T10:00:00Z",
+                        "valid_meeting": True,
+                        "transcribe": False,
+                        "notes_markdown": "Roadmap and architecture decisions.",
+                    },
+                    "meeting-b": {
+                        "id": "meeting-b",
+                        "title": "Loose Note",
+                        "created_at": "2026-03-09T11:00:00Z",
+                        "updated_at": "2026-03-09T11:00:00Z",
+                        "valid_meeting": True,
+                        "transcribe": False,
+                        "notes_markdown": "Unlisted note with budgeting details.",
+                    },
+                },
+                "transcripts": {
+                    "meeting-a": [
+                        {
+                            "id": "seg-1",
+                            "document_id": "meeting-a",
+                            "start_timestamp": "2026-03-09T10:01:00Z",
+                            "end_timestamp": "2026-03-09T10:02:00Z",
+                            "text": "We agreed on the roadmap.",
+                            "source": "system",
+                            "is_final": True,
+                        }
+                    ]
+                },
+                "documentLists": {"folder-a": ["meeting-a"]},
+                "documentListsMetadata": {"folder-a": {"id": "folder-a", "title": "Project Alpha"}},
+                "documentListsAttachments": {},
+                "meetingsMetadata": {},
+            }
+        }
+    }
+
+
+def _build_archive(project: Path, granola: Path) -> ArchiveConfig:
+    cache_path = granola / "cache-v4.json"
+    _write_cache(cache_path, _minimal_cache_payload())
+    config = ArchiveConfig.from_project_root(project, granola)
+    SyncService(config).sync(mode="hourly")
+    return config
+
+
 class QueryTests(unittest.TestCase):
     def test_folder_and_unlisted_queries_use_sqlite_index(self) -> None:
         with tempfile.TemporaryDirectory() as project_root, tempfile.TemporaryDirectory() as granola_root:
@@ -130,3 +186,47 @@ class QueryTests(unittest.TestCase):
             self.assertEqual(unlisted_results["results"][0]["meeting_id"], "meeting-b")
             self.assertTrue(transcript["available"])
             self.assertEqual(transcript["segment_count"], 1)
+
+    def test_transcript_preview_includes_truncation_fields(self) -> None:
+        """get_meeting_transcript(full=False) must include is_truncated and full_length."""
+        with tempfile.TemporaryDirectory() as project_root, tempfile.TemporaryDirectory() as granola_root:
+            config = _build_archive(Path(project_root), Path(granola_root))
+            database = ArchiveDatabase(config)
+            try:
+                transcript = database.get_meeting_transcript("meeting-a", full=False)
+            finally:
+                database.close()
+
+        self.assertTrue(transcript["available"])
+        self.assertIn("is_truncated", transcript)
+        self.assertIn("full_length", transcript)
+        self.assertIsInstance(transcript["is_truncated"], bool)
+        self.assertIsInstance(transcript["full_length"], int)
+        self.assertGreaterEqual(transcript["full_length"], 0)
+
+    def test_search_evidence_nonexistent_meeting_raises(self) -> None:
+        """search_evidence with a meeting_id that does not exist must raise KeyError."""
+        with tempfile.TemporaryDirectory() as project_root, tempfile.TemporaryDirectory() as granola_root:
+            config = _build_archive(Path(project_root), Path(granola_root))
+            database = ArchiveDatabase(config)
+            try:
+                with self.assertRaises(KeyError):
+                    database.search_evidence("anything", meeting_id="no-such-meeting-id")
+            finally:
+                database.close()
+
+    def test_search_unlisted_output_shape_consistent_with_search_folder(self) -> None:
+        """search_unlisted must return a 'filters' key, matching the shape of search_folder_with_filters."""
+        with tempfile.TemporaryDirectory() as project_root, tempfile.TemporaryDirectory() as granola_root:
+            config = _build_archive(Path(project_root), Path(granola_root))
+            database = ArchiveDatabase(config)
+            try:
+                unlisted = database.search_unlisted("budgeting", limit=5)
+                folder = database.search_folder_with_filters("Project Alpha", "roadmap", limit=5)
+            finally:
+                database.close()
+
+        self.assertIn("filters", unlisted)
+        self.assertIn("filters", folder)
+        self.assertIn("results", unlisted)
+        self.assertIn("results", folder)
