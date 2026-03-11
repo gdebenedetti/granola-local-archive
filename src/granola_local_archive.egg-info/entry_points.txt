@@ -1,2 +1,0 @@
-[console_scripts]
-granola-local-archive = granola_local_archive.cli:main
