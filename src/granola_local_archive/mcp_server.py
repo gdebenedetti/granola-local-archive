@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
+from datetime import date as _date
 from typing import BinaryIO
 from typing import Any
 
@@ -10,6 +11,16 @@ from . import __version__
 from .config import ArchiveConfig
 from .index import ArchiveDatabase
 from .storage import load_manifest
+
+
+def _validate_date(value: str | None, param_name: str) -> None:
+    """Raise ValueError when *value* is provided but not a real ISO 8601 calendar date."""
+    if value is None:
+        return
+    try:
+        _date.fromisoformat(value)
+    except ValueError:
+        raise ValueError(f"{param_name} must be a real ISO 8601 date (YYYY-MM-DD), got {value!r}")
 
 
 TOOLS = [
@@ -21,10 +32,10 @@ TOOLS = [
             "properties": {
                 "query": {"type": "string"},
                 "folder": {"type": "string"},
-                "date_from": {"type": "string", "format": "date"},
-                "date_to": {"type": "string", "format": "date"},
+                "date_from": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
+                "date_to": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
                 "has_transcript": {"type": "boolean"},
-                "limit": {"type": "integer", "default": 10},
+                "limit": {"type": "integer", "default": 10, "maximum": 50},
             },
             "required": ["query"],
         },
@@ -36,16 +47,16 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "folder": {"type": "string"},
-                "date_from": {"type": "string", "format": "date"},
-                "date_to": {"type": "string", "format": "date"},
+                "date_from": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
+                "date_to": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
                 "has_transcript": {"type": "boolean"},
-                "limit": {"type": "integer", "default": 25},
+                "limit": {"type": "integer", "default": 25, "maximum": 100},
             },
         },
     },
     {
         "name": "get_meeting",
-        "description": "Return normalized metadata and sidecar content for a meeting",
+        "description": "Return normalized metadata and notes for a meeting. Use the `meeting_id` value returned by `list_meetings` or `search_meetings`.",
         "inputSchema": {
             "type": "object",
             "properties": {"meeting_id": {"type": "string"}},
@@ -54,7 +65,7 @@ TOOLS = [
     },
     {
         "name": "get_meeting_transcript",
-        "description": "Return transcript metadata or the full transcript for a meeting",
+        "description": "Return transcript metadata or the full transcript for a meeting. When full=false (the default), the response includes an `is_truncated` flag and `full_length` so you can decide whether to re-fetch with full=true.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -66,7 +77,7 @@ TOOLS = [
     },
     {
         "name": "list_folders",
-        "description": "List all Granola folders plus the synthetic Unlisted bucket",
+        "description": "List all Granola folders plus the synthetic Unlisted bucket (id='__unlisted__'). Meetings that have not been assigned to any folder appear under '__unlisted__'. Use `search_unlisted` to search that bucket.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
@@ -80,16 +91,16 @@ TOOLS = [
     },
     {
         "name": "search_folder",
-        "description": "Run a search constrained to a folder, optionally bounded by date range",
+        "description": "Run a search constrained to a folder, optionally bounded by date range or transcript availability",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "folder_id_or_title": {"type": "string"},
                 "query": {"type": "string"},
-                "date_from": {"type": "string", "format": "date"},
-                "date_to": {"type": "string", "format": "date"},
+                "date_from": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
+                "date_to": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
                 "has_transcript": {"type": "boolean"},
-                "limit": {"type": "integer", "default": 10},
+                "limit": {"type": "integer", "default": 10, "maximum": 50},
             },
             "required": ["folder_id_or_title", "query"],
         },
@@ -103,9 +114,9 @@ TOOLS = [
                 "query": {"type": "string"},
                 "meeting_id": {"type": "string"},
                 "folder": {"type": "string"},
-                "date_from": {"type": "string", "format": "date"},
-                "date_to": {"type": "string", "format": "date"},
-                "limit": {"type": "integer", "default": 10},
+                "date_from": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
+                "date_to": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
+                "limit": {"type": "integer", "default": 10, "maximum": 50},
             },
             "required": ["query"],
         },
@@ -117,7 +128,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
-                "limit": {"type": "integer", "default": 10},
+                "limit": {"type": "integer", "default": 10, "maximum": 50},
             },
             "required": ["query"],
         },
@@ -152,6 +163,8 @@ class ToolRouter:
     def call_tool(self, name: str, arguments: dict[str, Any] | None) -> Any:
         arguments = arguments or {}
         if name == "search_meetings":
+            _validate_date(arguments.get("date_from"), "date_from")
+            _validate_date(arguments.get("date_to"), "date_to")
             return self.database.search_meetings(
                 query=arguments.get("query", ""),
                 folder=arguments.get("folder"),
@@ -161,6 +174,8 @@ class ToolRouter:
                 limit=int(arguments.get("limit", 10)),
             )
         if name == "list_meetings":
+            _validate_date(arguments.get("date_from"), "date_from")
+            _validate_date(arguments.get("date_to"), "date_to")
             return self.database.list_meetings(
                 folder=arguments.get("folder"),
                 date_from=arguments.get("date_from"),
@@ -180,6 +195,8 @@ class ToolRouter:
         if name == "get_folder":
             return self.database.get_folder(arguments["folder_id_or_title"])
         if name == "search_folder":
+            _validate_date(arguments.get("date_from"), "date_from")
+            _validate_date(arguments.get("date_to"), "date_to")
             return self.database.search_folder_with_filters(
                 arguments["folder_id_or_title"],
                 arguments["query"],
@@ -189,6 +206,8 @@ class ToolRouter:
                 limit=int(arguments.get("limit", 10)),
             )
         if name == "search_evidence":
+            _validate_date(arguments.get("date_from"), "date_from")
+            _validate_date(arguments.get("date_to"), "date_to")
             return self.database.search_evidence(
                 query=arguments["query"],
                 meeting_id=arguments.get("meeting_id"),
@@ -279,8 +298,14 @@ class StdioMCPServer:
         if method == "resources/templates/list":
             return _result(message_id, {"resourceTemplates": []})
         if method == "tools/call":
+            tool_name = params.get("name")
+            if not tool_name:
+                return _result(
+                    message_id,
+                    _tool_payload({"error": "tools/call requires a 'name' parameter"}, is_error=True),
+                )
             try:
-                payload = self.router.call_tool(params["name"], params.get("arguments"))
+                payload = self.router.call_tool(tool_name, params.get("arguments"))
                 return _result(message_id, _tool_payload(payload))
             except Exception as exc:
                 return _result(message_id, _tool_payload({"error": str(exc)}, is_error=True))

@@ -388,8 +388,10 @@ class ArchiveDatabase:
         payload["folder_ids"] = json.loads(payload.pop("folder_ids_json"))
         payload["folder_titles"] = json.loads(payload.pop("folder_titles_json"))
         payload["metadata"] = json.loads(payload.pop("metadata_json"))
-        sidecar_path = self.config.resolve_archive_path(payload.pop("meeting_sidecar_path"))
-        payload["sidecar"] = read_json_gz(sidecar_path) if sidecar_path else None
+        payload.pop("meeting_sidecar_path")
+        payload.pop("meeting_hash", None)
+        payload.pop("transcript_hash", None)
+        payload.pop("transcript_sidecar_path", None)
         return payload
 
     def load_meeting_record(self, meeting_id: str) -> MeetingRecord:
@@ -459,6 +461,9 @@ class ArchiveDatabase:
             }
         payload = read_json_gz(self.config.resolve_archive_path(row["transcript_sidecar_path"]))
         if not full:
+            full_text = payload["text"]
+            full_length = len(full_text)
+            preview = full_text[:4000]
             payload = {
                 "meeting_id": payload["meeting_id"],
                 "title": payload["title"],
@@ -466,7 +471,9 @@ class ArchiveDatabase:
                 "source": payload.get("source"),
                 "segment_count": payload["segment_count"],
                 "available": True,
-                "preview": payload["text"][:4000],
+                "preview": preview,
+                "is_truncated": full_length > 4000,
+                "full_length": full_length,
             }
         else:
             payload["available"] = True
@@ -477,7 +484,7 @@ class ArchiveDatabase:
             """
             SELECT id, title, description, document_count, updated_at, is_space
             FROM folders
-            ORDER BY CASE WHEN id = ? THEN 1 ELSE 0 END, title COLLATE NOCASE
+            ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, title COLLATE NOCASE
             """,
             (UNLISTED_FOLDER_ID,),
         ).fetchall()
@@ -531,7 +538,7 @@ class ArchiveDatabase:
         }
 
     def search_unlisted(self, query: str, limit: int = 10) -> dict[str, Any]:
-        return self.search_folder(UNLISTED_FOLDER_ID, query, limit=limit)
+        return self.search_folder_with_filters(UNLISTED_FOLDER_ID, query, limit=limit)
 
     def search_evidence(
         self,
@@ -544,17 +551,21 @@ class ArchiveDatabase:
     ) -> dict[str, Any]:
         limit = max(1, min(limit, 50))
         if meeting_id:
-            meeting_rows = [
-                self.connection.execute(
-                    """
-                    SELECT id, title, created_at, updated_at, notes_text, transcript_sidecar_path
-                    FROM meetings
-                    WHERE id = ?
-                    """,
-                    (meeting_id,),
-                ).fetchone()
-            ]
+            row = self.connection.execute(
+                """
+                SELECT id, title, created_at, updated_at, notes_text, transcript_sidecar_path
+                FROM meetings
+                WHERE id = ?
+                """,
+                (meeting_id,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"meeting {meeting_id} not found")
+            meeting_rows = [row]
             folder_record = None
+            # date_from / date_to are not applied when meeting_id is given
+            active_date_from = None
+            active_date_to = None
         else:
             params, filters, folder_record = self._build_meeting_filters(
                 folder=folder,
@@ -583,6 +594,8 @@ class ArchiveDatabase:
             sql += " ORDER BY bm25(meeting_fts), meetings.created_at DESC LIMIT ?"
             query_params.append(max(limit * 5, 20))
             meeting_rows = self.connection.execute(sql, query_params).fetchall()
+            active_date_from = date_from
+            active_date_to = date_to
 
         terms = _prepare_search_terms(query)
         evidence_items: list[dict[str, Any]] = []
@@ -642,7 +655,7 @@ class ArchiveDatabase:
         )
         return {
             "query": query,
-            "filters": self._serialize_filters(folder_record, date_from, date_to, None, meeting_id=meeting_id),
+            "filters": self._serialize_filters(folder_record, active_date_from, active_date_to, None, meeting_id=meeting_id),
             "items": evidence_items[:limit],
             "meetings_considered": len([row for row in meeting_rows if row is not None]),
         }
@@ -674,6 +687,9 @@ class ArchiveDatabase:
             "folders": folder_count,
             "transcripts": transcript_count,
             "meetings_missing_transcript": missing_count,
+            "source": None,
+            "last_report_path": None,
+            "last_hydrate_queue_path": None,
         }
         if manifest:
             payload["source"] = manifest.get("source", {})
@@ -737,9 +753,10 @@ class ArchiveDatabase:
         if len(exact) > 1:
             raise ValueError(f"folder title {folder_id_or_title!r} is ambiguous")
 
+        escaped = _escape_like(folder_id_or_title)
         like = self.connection.execute(
-            "SELECT * FROM folders WHERE lower(title) LIKE lower(?)",
-            (f"%{folder_id_or_title}%",),
+            "SELECT * FROM folders WHERE lower(title) LIKE lower(?) ESCAPE '\\'",
+            (f"%{escaped}%",),
         ).fetchall()
         if len(like) == 1:
             return like[0]
@@ -807,8 +824,9 @@ class ArchiveDatabase:
         if exact_rows:
             return exact_rows
 
-        like_sql = "SELECT id, title, created_at FROM meetings WHERE lower(title) LIKE lower(?)"
-        like_params = [f"%{reference}%"] + params
+        escaped = _escape_like(reference)
+        like_sql = "SELECT id, title, created_at FROM meetings WHERE lower(title) LIKE lower(?) ESCAPE '\\'"
+        like_params = [f"%{escaped}%"] + params
         if where_clauses:
             like_sql += " AND " + " AND ".join(where_clauses)
         return self.connection.execute(like_sql, like_params).fetchall()
@@ -829,21 +847,21 @@ class ArchiveDatabase:
 
 
 def _prepare_fts_query(query: str) -> str | None:
-    tokens = re.findall(r"[A-Za-z0-9_-]+", query or "")
+    tokens = re.findall(r"[\w-]+", query or "")
     if not tokens:
         return None
     return " AND ".join(f'"{token}"' for token in tokens)
 
 
 def _prepare_search_terms(query: str) -> list[str]:
-    return [token.casefold() for token in re.findall(r"[A-Za-z0-9_-]+", query or "")]
+    return [token.casefold() for token in re.findall(r"[\w-]+", query or "")]
 
 
 def _extract_text_match(text: str, terms: list[str], raw_query: str) -> dict[str, Any] | None:
     if not text:
         return None
     lowered = text.casefold()
-    normalized_tokens = {token.casefold() for token in re.findall(r"[A-Za-z0-9_-]+", text)}
+    normalized_tokens = {token.casefold() for token in re.findall(r"[\w-]+", text)}
     matched_terms = sorted({term for term in terms if term in normalized_tokens})
     if not matched_terms:
         phrase = raw_query.strip().casefold()
@@ -930,3 +948,8 @@ def _descending_iso_sort_key(value: str | None) -> float:
     if parsed is None:
         return 0.0
     return -parsed.timestamp()
+
+
+def _escape_like(value: str) -> str:
+    """Escape LIKE metacharacters (%, _, \\) for use in a parameterized LIKE query with ESCAPE '\\'."""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
