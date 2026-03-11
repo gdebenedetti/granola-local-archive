@@ -1,0 +1,359 @@
+from __future__ import annotations
+
+import json
+import sys
+from dataclasses import dataclass
+from typing import BinaryIO
+from typing import Any
+
+from . import __version__
+from .config import ArchiveConfig
+from .index import ArchiveDatabase
+from .storage import load_manifest
+
+
+TOOLS = [
+    {
+        "name": "search_meetings",
+        "description": "Search meetings by note content, transcript content, title, attendees, or folder",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "folder": {"type": "string"},
+                "date_from": {"type": "string", "format": "date"},
+                "date_to": {"type": "string", "format": "date"},
+                "has_transcript": {"type": "boolean"},
+                "limit": {"type": "integer", "default": 10},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "list_meetings",
+        "description": "List meetings with strict folder/date filters. Use this first before summarizing a folder or time window.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "folder": {"type": "string"},
+                "date_from": {"type": "string", "format": "date"},
+                "date_to": {"type": "string", "format": "date"},
+                "has_transcript": {"type": "boolean"},
+                "limit": {"type": "integer", "default": 25},
+            },
+        },
+    },
+    {
+        "name": "get_meeting",
+        "description": "Return normalized metadata and sidecar content for a meeting",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"meeting_id": {"type": "string"}},
+            "required": ["meeting_id"],
+        },
+    },
+    {
+        "name": "get_meeting_transcript",
+        "description": "Return transcript metadata or the full transcript for a meeting",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "meeting_id": {"type": "string"},
+                "full": {"type": "boolean", "default": False},
+            },
+            "required": ["meeting_id"],
+        },
+    },
+    {
+        "name": "list_folders",
+        "description": "List all Granola folders plus the synthetic Unlisted bucket",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_folder",
+        "description": "Return folder metadata and recent meetings",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"folder_id_or_title": {"type": "string"}},
+            "required": ["folder_id_or_title"],
+        },
+    },
+    {
+        "name": "search_folder",
+        "description": "Run a search constrained to a folder, optionally bounded by date range",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "folder_id_or_title": {"type": "string"},
+                "query": {"type": "string"},
+                "date_from": {"type": "string", "format": "date"},
+                "date_to": {"type": "string", "format": "date"},
+                "has_transcript": {"type": "boolean"},
+                "limit": {"type": "integer", "default": 10},
+            },
+            "required": ["folder_id_or_title", "query"],
+        },
+    },
+    {
+        "name": "search_evidence",
+        "description": "Return exact snippets from meeting notes and transcript segments. Use this before claiming decisions, people, dates, or next steps.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "meeting_id": {"type": "string"},
+                "folder": {"type": "string"},
+                "date_from": {"type": "string", "format": "date"},
+                "date_to": {"type": "string", "format": "date"},
+                "limit": {"type": "integer", "default": 10},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "search_unlisted",
+        "description": "Search documents that are not assigned to any Granola folder",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "integer", "default": 10},
+            },
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "get_folder_attachments",
+        "description": "Return attachment metadata for a folder",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"folder_id_or_title": {"type": "string"}},
+            "required": ["folder_id_or_title"],
+        },
+    },
+    {
+        "name": "stats",
+        "description": "Return counts and last sync metadata for the local Granola MCP index",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+]
+
+SUPPORTED_PROTOCOL_VERSIONS = (
+    "2025-03-26",
+    "2024-11-05",
+)
+
+
+@dataclass(slots=True)
+class ToolRouter:
+    config: ArchiveConfig
+    database: ArchiveDatabase
+
+    def call_tool(self, name: str, arguments: dict[str, Any] | None) -> Any:
+        arguments = arguments or {}
+        if name == "search_meetings":
+            return self.database.search_meetings(
+                query=arguments.get("query", ""),
+                folder=arguments.get("folder"),
+                date_from=arguments.get("date_from"),
+                date_to=arguments.get("date_to"),
+                has_transcript=arguments.get("has_transcript"),
+                limit=int(arguments.get("limit", 10)),
+            )
+        if name == "list_meetings":
+            return self.database.list_meetings(
+                folder=arguments.get("folder"),
+                date_from=arguments.get("date_from"),
+                date_to=arguments.get("date_to"),
+                has_transcript=arguments.get("has_transcript"),
+                limit=int(arguments.get("limit", 25)),
+            )
+        if name == "get_meeting":
+            return self.database.get_meeting(arguments["meeting_id"])
+        if name == "get_meeting_transcript":
+            return self.database.get_meeting_transcript(
+                arguments["meeting_id"],
+                full=bool(arguments.get("full", False)),
+            )
+        if name == "list_folders":
+            return self.database.list_folders()
+        if name == "get_folder":
+            return self.database.get_folder(arguments["folder_id_or_title"])
+        if name == "search_folder":
+            return self.database.search_folder_with_filters(
+                arguments["folder_id_or_title"],
+                arguments["query"],
+                date_from=arguments.get("date_from"),
+                date_to=arguments.get("date_to"),
+                has_transcript=arguments.get("has_transcript"),
+                limit=int(arguments.get("limit", 10)),
+            )
+        if name == "search_evidence":
+            return self.database.search_evidence(
+                query=arguments["query"],
+                meeting_id=arguments.get("meeting_id"),
+                folder=arguments.get("folder"),
+                date_from=arguments.get("date_from"),
+                date_to=arguments.get("date_to"),
+                limit=int(arguments.get("limit", 10)),
+            )
+        if name == "search_unlisted":
+            return self.database.search_unlisted(
+                arguments["query"],
+                limit=int(arguments.get("limit", 10)),
+            )
+        if name == "get_folder_attachments":
+            return self.database.get_folder_attachments(arguments["folder_id_or_title"])
+        if name == "stats":
+            return self.database.stats(manifest=load_manifest(self.config))
+        raise KeyError(f"unknown tool {name}")
+
+
+class StdioMCPServer:
+    def __init__(
+        self,
+        router: ToolRouter,
+        input_stream: BinaryIO | None = None,
+        output_stream: BinaryIO | None = None,
+    ):
+        self.router = router
+        self.input_stream = input_stream or sys.stdin.buffer
+        self.output_stream = output_stream or sys.stdout.buffer
+        self._shutdown_requested = False
+        self._transport = "ndjson"
+
+    def run(self) -> None:
+        while True:
+            message = self._read_message()
+            if message is None:
+                return
+            responses = self._dispatch_message(message)
+            for response in responses:
+                if response is not None:
+                    self._write_message(response)
+            if self._shutdown_requested:
+                return
+
+    def _dispatch_message(self, message: dict[str, Any] | list[Any]) -> list[dict[str, Any] | None]:
+        if isinstance(message, list):
+            return [self._handle_message(item) for item in message if isinstance(item, dict)]
+        return [self._handle_message(message)]
+
+    def _handle_message(self, message: dict[str, Any]) -> dict[str, Any] | None:
+        method = message.get("method")
+        message_id = message.get("id")
+        params = message.get("params") or {}
+
+        if method == "initialize":
+            requested_version = params.get("protocolVersion")
+            protocol_version = _negotiate_protocol_version(requested_version)
+            return _result(
+                message_id,
+                {
+                    "protocolVersion": protocol_version,
+                    "capabilities": {
+                        "tools": {"listChanged": False},
+                    },
+                    "serverInfo": {
+                        "name": "granola-local-mcp",
+                        "title": "Granola Local MCP",
+                        "version": __version__,
+                    },
+                },
+            )
+        if method == "notifications/initialized":
+            return None
+        if method == "notifications/cancelled":
+            return None
+        if method == "ping":
+            return _result(message_id, {})
+        if method == "shutdown":
+            self._shutdown_requested = True
+            return _result(message_id, {})
+        if method == "tools/list":
+            return _result(message_id, {"tools": TOOLS})
+        if method == "prompts/list":
+            return _result(message_id, {"prompts": []})
+        if method == "resources/list":
+            return _result(message_id, {"resources": []})
+        if method == "resources/templates/list":
+            return _result(message_id, {"resourceTemplates": []})
+        if method == "tools/call":
+            try:
+                payload = self.router.call_tool(params["name"], params.get("arguments"))
+                return _result(message_id, _tool_payload(payload))
+            except Exception as exc:
+                return _result(message_id, _tool_payload({"error": str(exc)}, is_error=True))
+        if message_id is None:
+            return None
+        return _error(message_id, -32601, f"method {method!r} not found")
+
+    def _read_message(self) -> dict[str, Any] | None:
+        while True:
+            line = self.input_stream.readline()
+            if not line:
+                return None
+            if line in {b"\r\n", b"\n"}:
+                continue
+            stripped = line.strip()
+            if stripped.startswith((b"{", b"[")):
+                self._transport = "ndjson"
+                return json.loads(stripped.decode("utf-8"))
+            headers = self._read_headers(line)
+            content_length = int(headers["content-length"])
+            payload = self.input_stream.read(content_length)
+            self._transport = "content-length"
+            return json.loads(payload.decode("utf-8"))
+
+    def _read_headers(self, first_line: bytes) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        line = first_line
+        while True:
+            if line in {b"\r\n", b"\n"}:
+                break
+            name, value = line.decode("utf-8").split(":", 1)
+            headers[name.lower()] = value.strip()
+            line = self.input_stream.readline()
+            if not line:
+                break
+        return headers
+
+    def _write_message(self, message: dict[str, Any]) -> None:
+        payload = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if self._transport == "content-length":
+            self.output_stream.write(f"Content-Length: {len(payload)}\r\n\r\n".encode("utf-8"))
+            self.output_stream.write(payload)
+        else:
+            self.output_stream.write(payload + b"\n")
+        self.output_stream.flush()
+
+
+def _tool_payload(result: Any, is_error: bool = False) -> dict[str, Any]:
+    structured = _normalize_tool_result(result)
+    return {
+        "content": [{"type": "text", "text": json.dumps(structured, indent=2, ensure_ascii=False)}],
+        "structuredContent": structured,
+        "isError": is_error,
+    }
+
+
+def _normalize_tool_result(result: Any) -> dict[str, Any]:
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, list):
+        return {"items": result}
+    return {"value": result}
+
+
+def _result(message_id: Any, result: Any) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": message_id, "result": result}
+
+
+def _error(message_id: Any, code: int, message: str) -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "id": message_id, "error": {"code": code, "message": message}}
+
+
+def _negotiate_protocol_version(requested_version: str | None) -> str:
+    if requested_version in SUPPORTED_PROTOCOL_VERSIONS:
+        return str(requested_version)
+    return SUPPORTED_PROTOCOL_VERSIONS[0]
