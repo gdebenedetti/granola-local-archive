@@ -1,17 +1,42 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
 
 UNLISTED_FOLDER_ID = "__unlisted__"
 UNLISTED_FOLDER_TITLE = "Unlisted"
+_CACHE_FILE_RE = re.compile(r"^cache-v(?P<version>\d+)\.json$")
 
 
 def _load_priority_folder_titles() -> tuple[str, ...]:
     raw_value = os.getenv("GRANOLA_PRIORITY_FOLDERS", "")
     return tuple(part.strip() for part in raw_value.split(",") if part.strip())
+
+
+def _discover_cache_path(granola_dir: Path) -> Path:
+    candidates: list[tuple[int, int, Path]] = []
+    for path in granola_dir.glob("cache-v*.json"):
+        match = _CACHE_FILE_RE.match(path.name)
+        if match is None:
+            continue
+        try:
+            version = int(match.group("version"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+        except FileNotFoundError:
+            continue
+        candidates.append((version, mtime_ns, path))
+
+    if candidates:
+        _, _, latest = max(candidates, key=lambda item: (item[0], item[1]))
+        return latest
+
+    return granola_dir / "cache-v4.json"
 
 
 @dataclass(slots=True)
@@ -41,6 +66,7 @@ class ArchiveConfig:
     def from_project_root(cls, project_root: Path, granola_dir: Path | None = None) -> "ArchiveConfig":
         project_root = project_root.expanduser().resolve()
         granola_dir = (granola_dir or Path("~/Library/Application Support/Granola")).expanduser().resolve()
+        cache_path = _discover_cache_path(granola_dir)
         archive_root = project_root / "archive"
         current_dir = archive_root / "current"
         history_dir = archive_root / "history"
@@ -48,7 +74,7 @@ class ArchiveConfig:
         return cls(
             project_root=project_root,
             granola_dir=granola_dir,
-            cache_path=granola_dir / "cache-v4.json",
+            cache_path=cache_path,
             archive_root=archive_root,
             manual_transcripts_dir=archive_root / "manual" / "transcripts",
             snapshots_dir=archive_root / "snapshots",

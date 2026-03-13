@@ -26,7 +26,7 @@ from .storage import (
     snapshot_cache,
     write_versioned_current_file,
 )
-from .utils import now_utc_iso, write_json
+from .utils import canonical_json_hash, now_utc_iso, read_json_gz, write_json
 
 
 @dataclass(slots=True)
@@ -103,6 +103,7 @@ class SyncService:
                         snapshot_path = snapshot_cache(self.config, current_hash, _stamp(timestamp))
                         normalized = parse_cache_file(self.config.cache_path)
                         normalized = apply_manual_transcript_overrides(self.config, normalized)
+                        normalized = _preserve_archived_transcripts(self.config, normalized)
                         parse_errors.extend(normalized.parse_errors)
                         (
                             changed_meeting_ids,
@@ -462,3 +463,86 @@ def _folder_manifest_entry(folder: Any) -> dict[str, Any]:
         "document_ids": folder.document_ids,
         "updated_at": folder.updated_at,
     }
+
+
+def _preserve_archived_transcripts(config: ArchiveConfig, normalized: NormalizedCache) -> NormalizedCache:
+    for meeting in normalized.meetings.values():
+        if meeting.transcript_segment_count > 0:
+            continue
+        payload = _load_archived_transcript_payload(config, meeting.id)
+        if payload is None:
+            continue
+        _apply_archived_transcript_payload(meeting, payload)
+    return normalized
+
+
+def _load_archived_transcript_payload(config: ArchiveConfig, meeting_id: str) -> dict[str, Any] | None:
+    current_path = config.current_transcripts_dir / f"{meeting_id}.json.gz"
+    if current_path.exists():
+        payload = _safe_read_transcript_payload(current_path)
+        if payload is not None:
+            return payload
+
+    history_dir = config.history_transcripts_dir / meeting_id
+    if not history_dir.exists():
+        return None
+
+    for history_path in sorted(history_dir.glob("*.json.gz"), reverse=True):
+        payload = _safe_read_transcript_payload(history_path)
+        if payload is not None:
+            return payload
+    return None
+
+
+def _safe_read_transcript_payload(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = read_json_gz(path)
+    except Exception:  # pragma: no cover - defensive
+        return None
+    if not isinstance(payload, dict):
+        return None
+    segments = payload.get("segments") or []
+    if not isinstance(segments, list):
+        return None
+    segment_count = payload.get("segment_count")
+    if not segments and not segment_count:
+        return None
+    return payload
+
+
+def _apply_archived_transcript_payload(meeting: MeetingRecord, payload: dict[str, Any]) -> None:
+    segments = payload.get("segments") or []
+    normalized_segments = [
+        {
+            "id": str(segment.get("id") or f"archived-{index:04d}"),
+            "document_id": meeting.id,
+            "start_timestamp": segment.get("start_timestamp"),
+            "end_timestamp": segment.get("end_timestamp"),
+            "text": str(segment.get("text") or "").strip(),
+            "source": str(segment.get("source") or payload.get("source") or "cache"),
+            "is_final": bool(segment.get("is_final", True)),
+        }
+        for index, segment in enumerate(segments, start=1)
+        if isinstance(segment, dict) and str(segment.get("text") or "").strip()
+    ]
+    if not normalized_segments:
+        return
+
+    meeting.transcript_segments = normalized_segments
+    meeting.transcript_segment_count = int(payload.get("segment_count") or len(normalized_segments))
+    meeting.transcript_text = str(payload.get("text") or _format_transcript_text(normalized_segments))
+    meeting.metadata["transcript_source"] = payload.get("source") or meeting.metadata.get("transcript_source") or "cache"
+    meeting.transcript_hash = canonical_json_hash(meeting.to_transcript_sidecar())
+    meeting.meeting_hash = canonical_json_hash(meeting.to_meeting_sidecar())
+
+
+def _format_transcript_text(segments: list[dict[str, Any]]) -> str:
+    lines: list[str] = []
+    for segment in segments:
+        text = str(segment.get("text") or "").strip()
+        if not text:
+            continue
+        timestamp = segment.get("start_timestamp") or "unknown"
+        source = str(segment.get("source") or "unknown")
+        lines.append(f"[{timestamp}] {source}: {text}")
+    return "\n".join(lines)
