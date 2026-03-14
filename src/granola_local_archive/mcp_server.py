@@ -23,130 +23,456 @@ def _validate_date(value: str | None, param_name: str) -> None:
         raise ValueError(f"{param_name} must be a real ISO 8601 date (YYYY-MM-DD), got {value!r}")
 
 
+def _object_schema(
+    properties: dict[str, Any],
+    *,
+    required: tuple[str, ...] = (),
+    additional_properties: bool = False,
+) -> dict[str, Any]:
+    schema = {
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": additional_properties,
+    }
+    if required:
+        schema["required"] = list(required)
+    return schema
+
+
+def _array_schema(items: dict[str, Any]) -> dict[str, Any]:
+    return {"type": "array", "items": items}
+
+
+def _nullable_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(schema.get("type"), str):
+        updated = dict(schema)
+        updated["type"] = [schema["type"], "null"]
+        return updated
+    return {"anyOf": [schema, {"type": "null"}]}
+
+
+def _tool_definition(
+    *,
+    name: str,
+    title: str,
+    description: str,
+    input_schema: dict[str, Any],
+    output_schema: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "title": title,
+        "description": description,
+        "inputSchema": input_schema,
+        "outputSchema": output_schema,
+        "annotations": {
+            "readOnlyHint": True,
+            "destructiveHint": False,
+            "idempotentHint": True,
+            "openWorldHint": False,
+        },
+    }
+
+
+DATE_PARAM_SCHEMA = {
+    "type": "string",
+    "format": "date",
+    "description": "ISO 8601 date (YYYY-MM-DD)",
+}
+STRING_PARAM_SCHEMA = {"type": "string"}
+BOOLEAN_PARAM_SCHEMA = {"type": "boolean"}
+QUERY_PARAM_SCHEMA = {"type": "string", "description": "Query text with one or more searchable terms."}
+MEETING_ID_PARAM_SCHEMA = {"type": "string", "description": "Meeting id returned by search or list tools."}
+FOLDER_REF_PARAM_SCHEMA = {"type": "string", "description": "Folder id or exact folder title."}
+LIMIT_10_SCHEMA = {"type": "integer", "default": 10, "maximum": 50}
+LIMIT_25_SCHEMA = {"type": "integer", "default": 25, "maximum": 100}
+NULLABLE_STRING_SCHEMA = {"type": ["string", "null"]}
+NULLABLE_BOOLEAN_SCHEMA = {"type": ["boolean", "null"]}
+STRING_ARRAY_SCHEMA = _array_schema({"type": "string"})
+ANY_OBJECT_SCHEMA = {"type": "object", "additionalProperties": True}
+
+SEARCH_ROW_PROPERTIES = {
+    "meeting_id": {"type": "string"},
+    "title": {"type": "string"},
+    "created_at": NULLABLE_STRING_SCHEMA,
+    "updated_at": NULLABLE_STRING_SCHEMA,
+    "transcript_segment_count": {"type": "integer"},
+    "folder_titles": STRING_ARRAY_SCHEMA,
+    "attendees": STRING_ARRAY_SCHEMA,
+    "notes_snippet": {"type": "string"},
+    "transcript_snippet": {"type": "string"},
+    "score": {"type": "number"},
+}
+SEARCH_ROW_SCHEMA = _object_schema(
+    SEARCH_ROW_PROPERTIES,
+    required=(
+        "meeting_id",
+        "title",
+        "created_at",
+        "updated_at",
+        "transcript_segment_count",
+        "folder_titles",
+        "attendees",
+        "notes_snippet",
+        "transcript_snippet",
+        "score",
+    ),
+)
+SEARCH_RESULTS_SCHEMA = _object_schema({"items": _array_schema(SEARCH_ROW_SCHEMA)}, required=("items",))
+
+FILTERS_PROPERTIES = {
+    "meeting_id": NULLABLE_STRING_SCHEMA,
+    "folder_id": NULLABLE_STRING_SCHEMA,
+    "folder_title": NULLABLE_STRING_SCHEMA,
+    "date_from": NULLABLE_STRING_SCHEMA,
+    "date_to": NULLABLE_STRING_SCHEMA,
+    "has_transcript": NULLABLE_BOOLEAN_SCHEMA,
+}
+FILTERS_SCHEMA = _object_schema(
+    FILTERS_PROPERTIES,
+    required=("meeting_id", "folder_id", "folder_title", "date_from", "date_to", "has_transcript"),
+)
+
+RECENT_MEETING_SCHEMA = _object_schema(
+    {
+        "id": {"type": "string"},
+        "title": {"type": "string"},
+        "created_at": NULLABLE_STRING_SCHEMA,
+        "transcript_segment_count": {"type": "integer"},
+    },
+    required=("id", "title", "created_at", "transcript_segment_count"),
+)
+
+FOLDER_SUMMARY_PROPERTIES = {
+    "id": {"type": "string"},
+    "title": {"type": "string"},
+    "description": NULLABLE_STRING_SCHEMA,
+    "document_count": {"type": "integer"},
+    "updated_at": NULLABLE_STRING_SCHEMA,
+    "is_space": {"type": "integer"},
+}
+FOLDER_SUMMARY_SCHEMA = _object_schema(
+    FOLDER_SUMMARY_PROPERTIES,
+    required=("id", "title", "description", "document_count", "updated_at", "is_space"),
+)
+FOLDER_DETAIL_PROPERTIES = {
+    "id": {"type": "string"},
+    "title": {"type": "string"},
+    "description": NULLABLE_STRING_SCHEMA,
+    "workspace_id": NULLABLE_STRING_SCHEMA,
+    "workspace_display_name": NULLABLE_STRING_SCHEMA,
+    "company_domain": NULLABLE_STRING_SCHEMA,
+    "created_at": NULLABLE_STRING_SCHEMA,
+    "updated_at": NULLABLE_STRING_SCHEMA,
+    "is_space": {"type": "integer"},
+    "is_default_folder": {"type": "integer"},
+    "parent_folder_id": NULLABLE_STRING_SCHEMA,
+    "document_count": {"type": "integer"},
+    "folder_hash": {"type": "string"},
+    "folder_sidecar_path": {"type": "string"},
+}
+FOLDER_DETAIL_SCHEMA = _object_schema(
+    FOLDER_DETAIL_PROPERTIES,
+    required=tuple(FOLDER_DETAIL_PROPERTIES),
+)
+FOLDER_WITH_RECENT_MEETINGS_SCHEMA = _object_schema(
+    {
+        **FOLDER_DETAIL_PROPERTIES,
+        "recent_meetings": _array_schema(RECENT_MEETING_SCHEMA),
+    },
+    required=tuple(FOLDER_DETAIL_PROPERTIES) + ("recent_meetings",),
+)
+
+ATTACHMENT_SCHEMA = _object_schema(
+    {
+        "id": {"type": "string"},
+        "name": NULLABLE_STRING_SCHEMA,
+        "type": NULLABLE_STRING_SCHEMA,
+        "mime_type": NULLABLE_STRING_SCHEMA,
+        "content_summary": NULLABLE_STRING_SCHEMA,
+        "content_markdown": NULLABLE_STRING_SCHEMA,
+        "size_in_bytes": {"type": ["integer", "null"]},
+        "created_at": NULLABLE_STRING_SCHEMA,
+        "updated_at": NULLABLE_STRING_SCHEMA,
+    },
+    required=(
+        "id",
+        "name",
+        "type",
+        "mime_type",
+        "content_summary",
+        "content_markdown",
+        "size_in_bytes",
+        "created_at",
+        "updated_at",
+    ),
+)
+
+EVIDENCE_ITEM_SCHEMA = _object_schema(
+    {
+        "meeting_id": {"type": "string"},
+        "title": {"type": "string"},
+        "created_at": NULLABLE_STRING_SCHEMA,
+        "updated_at": NULLABLE_STRING_SCHEMA,
+        "source_kind": {"type": "string"},
+        "snippet": {"type": "string"},
+        "matched_terms": STRING_ARRAY_SCHEMA,
+        "match_count": {"type": "integer"},
+        "start_timestamp": NULLABLE_STRING_SCHEMA,
+        "end_timestamp": NULLABLE_STRING_SCHEMA,
+        "speaker": NULLABLE_STRING_SCHEMA,
+    },
+    required=(
+        "meeting_id",
+        "title",
+        "created_at",
+        "updated_at",
+        "source_kind",
+        "snippet",
+        "matched_terms",
+        "match_count",
+    ),
+)
+
 TOOLS = [
-    {
-        "name": "search_meetings",
-        "description": "Search meetings by note content, transcript content, title, attendees, or folder",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "folder": {"type": "string"},
-                "date_from": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
-                "date_to": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
-                "has_transcript": {"type": "boolean"},
-                "limit": {"type": "integer", "default": 10, "maximum": 50},
+    _tool_definition(
+        name="search_meetings",
+        title="Search Meetings",
+        description="Search meetings by note content, transcript content, title, attendees, or folder.",
+        input_schema=_object_schema(
+            {
+                "query": QUERY_PARAM_SCHEMA,
+                "folder": STRING_PARAM_SCHEMA,
+                "date_from": DATE_PARAM_SCHEMA,
+                "date_to": DATE_PARAM_SCHEMA,
+                "has_transcript": BOOLEAN_PARAM_SCHEMA,
+                "limit": LIMIT_10_SCHEMA,
             },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "list_meetings",
-        "description": "List meetings with strict folder/date filters. Use this first before summarizing a folder or time window.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "folder": {"type": "string"},
-                "date_from": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
-                "date_to": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
-                "has_transcript": {"type": "boolean"},
-                "limit": {"type": "integer", "default": 25, "maximum": 100},
+            required=("query",),
+        ),
+        output_schema=SEARCH_RESULTS_SCHEMA,
+    ),
+    _tool_definition(
+        name="list_meetings",
+        title="List Meetings",
+        description="List meetings with strict folder and date filters before summarizing a time window.",
+        input_schema=_object_schema(
+            {
+                "folder": STRING_PARAM_SCHEMA,
+                "date_from": DATE_PARAM_SCHEMA,
+                "date_to": DATE_PARAM_SCHEMA,
+                "has_transcript": BOOLEAN_PARAM_SCHEMA,
+                "limit": LIMIT_25_SCHEMA,
+            }
+        ),
+        output_schema=_object_schema(
+            {
+                "filters": FILTERS_SCHEMA,
+                "items": _array_schema(SEARCH_ROW_SCHEMA),
             },
-        },
-    },
-    {
-        "name": "get_meeting",
-        "description": "Return normalized metadata and notes for a meeting. Use the `meeting_id` value returned by `list_meetings` or `search_meetings`.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"meeting_id": {"type": "string"}},
-            "required": ["meeting_id"],
-        },
-    },
-    {
-        "name": "get_meeting_transcript",
-        "description": "Return transcript metadata or the full transcript for a meeting. When full=false (the default), the response includes an `is_truncated` flag and `full_length` so you can decide whether to re-fetch with full=true.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "meeting_id": {"type": "string"},
+            required=("filters", "items"),
+        ),
+    ),
+    _tool_definition(
+        name="get_meeting",
+        title="Get Meeting",
+        description="Return normalized metadata and notes for a meeting id returned by list or search tools.",
+        input_schema=_object_schema(
+            {"meeting_id": MEETING_ID_PARAM_SCHEMA},
+            required=("meeting_id",),
+        ),
+        output_schema=_object_schema(
+            {
+                "id": {"type": "string"},
+                "title": {"type": "string"},
+                "created_at": NULLABLE_STRING_SCHEMA,
+                "updated_at": NULLABLE_STRING_SCHEMA,
+                "valid_meeting": {"type": "integer"},
+                "transcribe": {"type": "integer"},
+                "notes_text": {"type": "string"},
+                "notes_markdown": NULLABLE_STRING_SCHEMA,
+                "notes_plain": NULLABLE_STRING_SCHEMA,
+                "attendees": STRING_ARRAY_SCHEMA,
+                "folder_ids": STRING_ARRAY_SCHEMA,
+                "folder_titles": STRING_ARRAY_SCHEMA,
+                "transcript_segment_count": {"type": "integer"},
+                "metadata": ANY_OBJECT_SCHEMA,
+            },
+            required=(
+                "id",
+                "title",
+                "created_at",
+                "updated_at",
+                "valid_meeting",
+                "transcribe",
+                "notes_text",
+                "notes_markdown",
+                "notes_plain",
+                "attendees",
+                "folder_ids",
+                "folder_titles",
+                "transcript_segment_count",
+                "metadata",
+            ),
+        ),
+    ),
+    _tool_definition(
+        name="get_meeting_transcript",
+        title="Get Meeting Transcript",
+        description="Return transcript metadata or the full transcript for a meeting.",
+        input_schema=_object_schema(
+            {
+                "meeting_id": MEETING_ID_PARAM_SCHEMA,
                 "full": {"type": "boolean", "default": False},
             },
-            "required": ["meeting_id"],
-        },
-    },
-    {
-        "name": "list_folders",
-        "description": "List all Granola folders plus the synthetic Unlisted bucket (id='__unlisted__'). Meetings that have not been assigned to any folder appear under '__unlisted__'. Use `search_unlisted` to search that bucket.",
-        "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "get_folder",
-        "description": "Return folder metadata and recent meetings",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"folder_id_or_title": {"type": "string"}},
-            "required": ["folder_id_or_title"],
-        },
-    },
-    {
-        "name": "search_folder",
-        "description": "Run a search constrained to a folder, optionally bounded by date range or transcript availability",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "folder_id_or_title": {"type": "string"},
-                "query": {"type": "string"},
-                "date_from": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
-                "date_to": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
-                "has_transcript": {"type": "boolean"},
-                "limit": {"type": "integer", "default": 10, "maximum": 50},
-            },
-            "required": ["folder_id_or_title", "query"],
-        },
-    },
-    {
-        "name": "search_evidence",
-        "description": "Return exact snippets from meeting notes and transcript segments. Use this before claiming decisions, people, dates, or next steps.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
+            required=("meeting_id",),
+        ),
+        output_schema=_object_schema(
+            {
                 "meeting_id": {"type": "string"},
-                "folder": {"type": "string"},
-                "date_from": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
-                "date_to": {"type": "string", "format": "date", "description": "ISO 8601 date (YYYY-MM-DD)"},
-                "limit": {"type": "integer", "default": 10, "maximum": 50},
+                "title": NULLABLE_STRING_SCHEMA,
+                "created_at": NULLABLE_STRING_SCHEMA,
+                "segment_count": {"type": ["integer", "null"]},
+                "available": {"type": "boolean"},
+                "source": NULLABLE_STRING_SCHEMA,
+                "preview": {"type": "string"},
+                "is_truncated": {"type": "boolean"},
+                "full_length": {"type": "integer"},
+                "text": {"type": "string"},
+                "segments": _array_schema(ANY_OBJECT_SCHEMA),
             },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "search_unlisted",
-        "description": "Search documents that are not assigned to any Granola folder",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
+            required=("meeting_id", "title", "created_at", "available"),
+            additional_properties=True,
+        ),
+    ),
+    _tool_definition(
+        name="list_folders",
+        title="List Folders",
+        description="List Granola folders plus the synthetic '__unlisted__' bucket.",
+        input_schema=_object_schema({}),
+        output_schema=_object_schema({"items": _array_schema(FOLDER_SUMMARY_SCHEMA)}, required=("items",)),
+    ),
+    _tool_definition(
+        name="get_folder",
+        title="Get Folder",
+        description="Return folder metadata and recent meetings for a folder id or exact title.",
+        input_schema=_object_schema(
+            {"folder_id_or_title": FOLDER_REF_PARAM_SCHEMA},
+            required=("folder_id_or_title",),
+        ),
+        output_schema=FOLDER_WITH_RECENT_MEETINGS_SCHEMA,
+    ),
+    _tool_definition(
+        name="search_folder",
+        title="Search Folder",
+        description="Run a search constrained to one folder, with optional date and transcript filters.",
+        input_schema=_object_schema(
+            {
+                "folder_id_or_title": FOLDER_REF_PARAM_SCHEMA,
+                "query": QUERY_PARAM_SCHEMA,
+                "date_from": DATE_PARAM_SCHEMA,
+                "date_to": DATE_PARAM_SCHEMA,
+                "has_transcript": BOOLEAN_PARAM_SCHEMA,
+                "limit": LIMIT_10_SCHEMA,
+            },
+            required=("folder_id_or_title", "query"),
+        ),
+        output_schema=_object_schema(
+            {
+                "folder": FOLDER_DETAIL_SCHEMA,
+                "filters": FILTERS_SCHEMA,
+                "results": _array_schema(SEARCH_ROW_SCHEMA),
+            },
+            required=("folder", "filters", "results"),
+        ),
+    ),
+    _tool_definition(
+        name="search_evidence",
+        title="Search Evidence",
+        description="Return exact snippets from notes and transcript segments before making factual claims.",
+        input_schema=_object_schema(
+            {
+                "query": QUERY_PARAM_SCHEMA,
+                "meeting_id": MEETING_ID_PARAM_SCHEMA,
+                "folder": STRING_PARAM_SCHEMA,
+                "date_from": DATE_PARAM_SCHEMA,
+                "date_to": DATE_PARAM_SCHEMA,
+                "limit": LIMIT_10_SCHEMA,
+            },
+            required=("query",),
+        ),
+        output_schema=_object_schema(
+            {
                 "query": {"type": "string"},
-                "limit": {"type": "integer", "default": 10, "maximum": 50},
+                "filters": FILTERS_SCHEMA,
+                "items": _array_schema(EVIDENCE_ITEM_SCHEMA),
+                "meetings_considered": {"type": "integer"},
             },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "get_folder_attachments",
-        "description": "Return attachment metadata for a folder",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"folder_id_or_title": {"type": "string"}},
-            "required": ["folder_id_or_title"],
-        },
-    },
-    {
-        "name": "stats",
-        "description": "Return counts and last sync metadata for the local Granola MCP index",
-        "inputSchema": {"type": "object", "properties": {}},
-    },
+            required=("query", "filters", "items", "meetings_considered"),
+        ),
+    ),
+    _tool_definition(
+        name="search_unlisted",
+        title="Search Unlisted Meetings",
+        description="Search documents that are not assigned to any Granola folder.",
+        input_schema=_object_schema(
+            {
+                "query": QUERY_PARAM_SCHEMA,
+                "limit": LIMIT_10_SCHEMA,
+            },
+            required=("query",),
+        ),
+        output_schema=_object_schema(
+            {
+                "folder": FOLDER_DETAIL_SCHEMA,
+                "filters": FILTERS_SCHEMA,
+                "results": _array_schema(SEARCH_ROW_SCHEMA),
+            },
+            required=("folder", "filters", "results"),
+        ),
+    ),
+    _tool_definition(
+        name="get_folder_attachments",
+        title="Get Folder Attachments",
+        description="Return attachment metadata for a folder id or exact title.",
+        input_schema=_object_schema(
+            {"folder_id_or_title": FOLDER_REF_PARAM_SCHEMA},
+            required=("folder_id_or_title",),
+        ),
+        output_schema=_object_schema(
+            {
+                "folder": FOLDER_DETAIL_SCHEMA,
+                "attachments": _array_schema(ATTACHMENT_SCHEMA),
+            },
+            required=("folder", "attachments"),
+        ),
+    ),
+    _tool_definition(
+        name="stats",
+        title="Index Stats",
+        description="Return counts and last-sync metadata for the local Granola MCP index.",
+        input_schema=_object_schema({}),
+        output_schema=_object_schema(
+            {
+                "meetings": {"type": "integer"},
+                "folders": {"type": "integer"},
+                "transcripts": {"type": "integer"},
+                "meetings_missing_transcript": {"type": "integer"},
+                "source": _nullable_schema(ANY_OBJECT_SCHEMA),
+                "last_report_path": NULLABLE_STRING_SCHEMA,
+                "last_hydrate_queue_path": NULLABLE_STRING_SCHEMA,
+            },
+            required=(
+                "meetings",
+                "folders",
+                "transcripts",
+                "meetings_missing_transcript",
+                "source",
+                "last_report_path",
+                "last_hydrate_queue_path",
+            ),
+        ),
+    ),
 ]
 
 SUPPORTED_PROTOCOL_VERSIONS = (
@@ -172,6 +498,10 @@ class UnknownToolError(Exception):
 
 class ToolArgumentError(ValueError):
     """Raised when tool arguments fail the published input schema."""
+
+
+class InvalidParamsError(ValueError):
+    """Raised when request params do not match the MCP protocol schema."""
 
 
 TOOL_SCHEMAS = {tool["name"]: tool.get("inputSchema", {}) for tool in TOOLS}
@@ -312,7 +642,10 @@ class StdioMCPServer:
         if method == "initialize":
             if self._protocol_version is not None:
                 return _error(message_id, -32600, "Invalid Request")
-            requested_version = params.get("protocolVersion")
+            try:
+                requested_version = _validate_initialize_params(params)
+            except InvalidParamsError as exc:
+                return _error(message_id, -32602, str(exc))
             protocol_version = _negotiate_protocol_version(requested_version)
             self._protocol_version = protocol_version
             return _result(
@@ -468,10 +801,17 @@ def _validate_tool_arguments(name: str, arguments: dict[str, Any]) -> dict[str, 
 
     properties = schema.get("properties", {})
     required = schema.get("required", [])
+    allow_additional_properties = bool(schema.get("additionalProperties", True))
 
     for field_name in required:
         if field_name not in arguments:
             raise ToolArgumentError(f"{name} requires a {field_name!r} argument")
+
+    if not allow_additional_properties:
+        unknown_arguments = sorted(field_name for field_name in arguments if field_name not in properties)
+        if unknown_arguments:
+            joined = ", ".join(repr(field_name) for field_name in unknown_arguments)
+            raise ToolArgumentError(f"{name} does not accept argument(s): {joined}")
 
     for field_name, value in arguments.items():
         property_schema = properties.get(field_name)
@@ -496,3 +836,28 @@ def _validate_tool_arguments(name: str, arguments: dict[str, Any]) -> dict[str, 
             if minimum is not None and value < minimum:
                 raise ToolArgumentError(f"{field_name} must be >= {minimum}")
     return arguments
+
+
+def _validate_initialize_params(params: dict[str, Any]) -> str:
+    protocol_version = params.get("protocolVersion")
+    capabilities = params.get("capabilities")
+    client_info = params.get("clientInfo")
+
+    if not isinstance(protocol_version, str) or not protocol_version:
+        raise InvalidParamsError("initialize requires a non-empty 'protocolVersion' string")
+    if not isinstance(capabilities, dict):
+        raise InvalidParamsError("initialize requires a 'capabilities' object")
+    if not isinstance(client_info, dict):
+        raise InvalidParamsError("initialize requires a 'clientInfo' object")
+
+    client_name = client_info.get("name")
+    client_version = client_info.get("version")
+    client_title = client_info.get("title")
+
+    if not isinstance(client_name, str) or not client_name:
+        raise InvalidParamsError("initialize requires clientInfo.name to be a non-empty string")
+    if not isinstance(client_version, str) or not client_version:
+        raise InvalidParamsError("initialize requires clientInfo.version to be a non-empty string")
+    if client_title is not None and not isinstance(client_title, str):
+        raise InvalidParamsError("initialize requires clientInfo.title to be a string when provided")
+    return protocol_version

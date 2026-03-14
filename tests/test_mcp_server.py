@@ -16,7 +16,16 @@ from granola_local_archive.syncer import SyncService
 class DummyRouter:
     def call_tool(self, name, arguments):
         if name == "list_folders":
-            return [{"id": "folder-1", "title": "Folder 1"}]
+            return [
+                {
+                    "id": "folder-1",
+                    "title": "Folder 1",
+                    "description": None,
+                    "document_count": 1,
+                    "updated_at": None,
+                    "is_space": 0,
+                }
+            ]
         return {"name": name, "arguments": arguments or {}}
 
 
@@ -66,7 +75,11 @@ def _initialize_session(protocol_version: str = "2025-11-25") -> str:
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
-                "params": {"protocolVersion": protocol_version},
+                "params": {
+                    "protocolVersion": protocol_version,
+                    "capabilities": {},
+                    "clientInfo": {"name": "codex-test", "version": "1.0.0"},
+                },
             }
         )
         + "\n"
@@ -94,6 +107,10 @@ class MCPServerTransportTests(unittest.TestCase):
             if line.strip()
         ]
         self.assertEqual(responses[0]["result"]["protocolVersion"], "2025-11-25")
+        tool = next(item for item in responses[1]["result"]["tools"] if item["name"] == "search_meetings")
+        self.assertFalse(tool["inputSchema"]["additionalProperties"])
+        self.assertIn("annotations", tool)
+        self.assertIn("outputSchema", tool)
         self.assertIn("tools", responses[1]["result"])
         self.assertGreater(len(responses[1]["result"]["tools"]), 0)
 
@@ -105,7 +122,11 @@ class MCPServerTransportTests(unittest.TestCase):
                         "jsonrpc": "2.0",
                         "id": 1,
                         "method": "initialize",
-                        "params": {"protocolVersion": "2099-01-01"},
+                        "params": {
+                            "protocolVersion": "2099-01-01",
+                            "capabilities": {},
+                            "clientInfo": {"name": "codex-test", "version": "1.0.0"},
+                        },
                     }
                 )
                 + "\n"
@@ -124,7 +145,11 @@ class MCPServerTransportTests(unittest.TestCase):
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "initialize",
-                "params": {"protocolVersion": "2024-11-05"},
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "codex-test", "version": "1.0.0"},
+                },
             },
             separators=(",", ":"),
         ).encode("utf-8")
@@ -150,6 +175,27 @@ class MCPServerTransportTests(unittest.TestCase):
         response = json.loads(output_stream.getvalue().decode("utf-8").strip())
         self.assertEqual(response["id"], None)
         self.assertEqual(response["error"]["code"], -32700)
+
+    def test_initialize_requires_current_mcp_params(self) -> None:
+        input_stream = io.BytesIO(
+            (
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {"protocolVersion": "2025-11-25"},
+                    }
+                )
+                + "\n"
+            ).encode("utf-8")
+        )
+        output_stream = io.BytesIO()
+
+        StdioMCPServer(DummyRouter(), input_stream=input_stream, output_stream=output_stream).run()
+
+        response = json.loads(output_stream.getvalue().decode("utf-8").strip())
+        self.assertEqual(response["error"]["code"], -32602)
 
     def test_batch_invalid_entries_return_invalid_request(self) -> None:
         input_stream = io.BytesIO(
@@ -193,7 +239,11 @@ class MCPServerTransportTests(unittest.TestCase):
                             "jsonrpc": "2.0",
                             "id": 1,
                             "method": "initialize",
-                            "params": {"protocolVersion": "2025-03-26"},
+                            "params": {
+                                "protocolVersion": "2025-03-26",
+                                "capabilities": {},
+                                "clientInfo": {"name": "codex-test", "version": "1.0.0"},
+                            },
                         }
                     ]
                 )
@@ -278,6 +328,41 @@ class MCPServerTransportTests(unittest.TestCase):
 
                 response = json.loads(output_stream.getvalue().decode("utf-8").splitlines()[-1])
                 self.assertEqual(response["error"]["code"], -32602)
+            finally:
+                database.close()
+
+    def test_unknown_tool_argument_returns_tool_error(self) -> None:
+        with tempfile.TemporaryDirectory() as project_root, tempfile.TemporaryDirectory() as granola_root:
+            router, database = _build_tool_router(Path(project_root), Path(granola_root))
+            try:
+                input_stream = io.BytesIO(
+                    (
+                        _initialize_session()
+                        + json.dumps(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": 2,
+                                "method": "tools/call",
+                                "params": {
+                                    "name": "search_meetings",
+                                    "arguments": {"query": "roadmap", "unexpected": True},
+                                },
+                            }
+                        )
+                        + "\n"
+                    ).encode("utf-8")
+                )
+                output_stream = io.BytesIO()
+
+                StdioMCPServer(
+                    router,
+                    input_stream=input_stream,
+                    output_stream=output_stream,
+                ).run()
+
+                response = json.loads(output_stream.getvalue().decode("utf-8").splitlines()[-1])
+                self.assertTrue(response["result"]["isError"])
+                self.assertIn("does not accept", response["result"]["content"][0]["text"])
             finally:
                 database.close()
 
