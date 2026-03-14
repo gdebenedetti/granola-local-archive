@@ -251,6 +251,8 @@ class StdioMCPServer:
         self.output_stream = output_stream or sys.stdout.buffer
         self._shutdown_requested = False
         self._transport = "ndjson"
+        self._protocol_version: str | None = None
+        self._initialized = False
 
     def run(self) -> None:
         while True:
@@ -270,6 +272,8 @@ class StdioMCPServer:
 
     def _dispatch_message(self, message: dict[str, Any] | list[Any]) -> list[dict[str, Any] | None]:
         if isinstance(message, list):
+            if not self._batch_requests_supported():
+                return [_error(None, -32600, "Invalid Request")]
             if not message:
                 return [_error(None, -32600, "Invalid Request")]
             responses: list[dict[str, Any] | None] = []
@@ -287,8 +291,11 @@ class StdioMCPServer:
         params = message.get("params") or {}
 
         if method == "initialize":
+            if self._protocol_version is not None:
+                return _error(message_id, -32600, "Invalid Request")
             requested_version = params.get("protocolVersion")
             protocol_version = _negotiate_protocol_version(requested_version)
+            self._protocol_version = protocol_version
             return _result(
                 message_id,
                 {
@@ -304,9 +311,21 @@ class StdioMCPServer:
                 },
             )
         if method == "notifications/initialized":
+            if self._protocol_version is not None:
+                self._initialized = True
             return None
         if method == "notifications/cancelled":
             return None
+        if self._protocol_version is None:
+            if message_id is None:
+                return None
+            return _error(message_id, -32600, "Server not initialized")
+        if not self._initialized:
+            if method == "ping":
+                return _result(message_id, {})
+            if message_id is None:
+                return None
+            return _error(message_id, -32600, "Server initialization incomplete")
         if method == "ping":
             return _result(message_id, {})
         if method == "shutdown":
@@ -374,6 +393,9 @@ class StdioMCPServer:
             if not line:
                 break
         return headers
+
+    def _batch_requests_supported(self) -> bool:
+        return self._initialized and self._protocol_version in {"2025-03-26", "2024-11-05"}
 
     def _write_message(self, message: dict[str, Any]) -> None:
         payload = json.dumps(message, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

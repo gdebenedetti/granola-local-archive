@@ -59,19 +59,27 @@ def _build_tool_router(project: Path, granola: Path) -> tuple[ToolRouter, Archiv
     return ToolRouter(config=config, database=database), database
 
 
+def _initialize_session(protocol_version: str = "2025-11-25") -> str:
+    return (
+        json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {"protocolVersion": protocol_version},
+            }
+        )
+        + "\n"
+        + json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        + "\n"
+    )
+
+
 class MCPServerTransportTests(unittest.TestCase):
     def test_ndjson_stdio_protocol(self) -> None:
         input_stream = io.BytesIO(
             (
-                json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "initialize",
-                        "params": {"protocolVersion": "2025-11-25"},
-                    }
-                )
-                + "\n"
+                _initialize_session()
                 + json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
                 + "\n"
             ).encode("utf-8")
@@ -146,17 +154,7 @@ class MCPServerTransportTests(unittest.TestCase):
     def test_batch_invalid_entries_return_invalid_request(self) -> None:
         input_stream = io.BytesIO(
             (
-                json.dumps(
-                    {
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "initialize",
-                        "params": {"protocolVersion": "2025-03-26"},
-                    }
-                )
-                + "\n"
-                + json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
-                + "\n"
+                _initialize_session("2025-03-26")
                 + json.dumps([1, {"jsonrpc": "2.0", "id": 2, "method": "ping"}])
                 + "\n"
             ).encode("utf-8")
@@ -173,13 +171,50 @@ class MCPServerTransportTests(unittest.TestCase):
         self.assertEqual(responses[1]["error"]["code"], -32600)
         self.assertEqual(responses[2]["result"], {})
 
-    def test_tool_results_wrap_list_payloads_for_cursor_compatibility(self) -> None:
+    def test_requests_before_initialize_return_invalid_request(self) -> None:
+        input_stream = io.BytesIO(
+            (json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}) + "\n").encode(
+                "utf-8"
+            )
+        )
+        output_stream = io.BytesIO()
+
+        StdioMCPServer(DummyRouter(), input_stream=input_stream, output_stream=output_stream).run()
+
+        response = json.loads(output_stream.getvalue().decode("utf-8").strip())
+        self.assertEqual(response["error"]["code"], -32600)
+
+    def test_initialize_cannot_be_batched(self) -> None:
         input_stream = io.BytesIO(
             (
                 json.dumps(
+                    [
+                        {
+                            "jsonrpc": "2.0",
+                            "id": 1,
+                            "method": "initialize",
+                            "params": {"protocolVersion": "2025-03-26"},
+                        }
+                    ]
+                )
+                + "\n"
+            ).encode("utf-8")
+        )
+        output_stream = io.BytesIO()
+
+        StdioMCPServer(DummyRouter(), input_stream=input_stream, output_stream=output_stream).run()
+
+        response = json.loads(output_stream.getvalue().decode("utf-8").strip())
+        self.assertEqual(response["error"]["code"], -32600)
+
+    def test_tool_results_wrap_list_payloads_for_cursor_compatibility(self) -> None:
+        input_stream = io.BytesIO(
+            (
+                _initialize_session()
+                + json.dumps(
                     {
                         "jsonrpc": "2.0",
-                        "id": 1,
+                        "id": 2,
                         "method": "tools/call",
                         "params": {"name": "list_folders", "arguments": {}},
                     }
@@ -191,7 +226,7 @@ class MCPServerTransportTests(unittest.TestCase):
 
         StdioMCPServer(DummyRouter(), input_stream=input_stream, output_stream=output_stream).run()
 
-        response = json.loads(output_stream.getvalue().decode("utf-8").strip())
+        response = json.loads(output_stream.getvalue().decode("utf-8").splitlines()[-1])
         structured = response["result"]["structuredContent"]
         self.assertIsInstance(structured, dict)
         self.assertEqual(structured["items"][0]["title"], "Folder 1")
@@ -201,10 +236,11 @@ class MCPServerTransportTests(unittest.TestCase):
         """tools/call that omits 'name' must return isError=true with a readable message."""
         input_stream = io.BytesIO(
             (
-                json.dumps(
+                _initialize_session()
+                + json.dumps(
                     {
                         "jsonrpc": "2.0",
-                        "id": 1,
+                        "id": 2,
                         "method": "tools/call",
                         "params": {"arguments": {}},
                     }
@@ -216,7 +252,7 @@ class MCPServerTransportTests(unittest.TestCase):
 
         StdioMCPServer(DummyRouter(), input_stream=input_stream, output_stream=output_stream).run()
 
-        response = json.loads(output_stream.getvalue().decode("utf-8").strip())
+        response = json.loads(output_stream.getvalue().decode("utf-8").splitlines()[-1])
         self.assertTrue(response["result"]["isError"])
         error_text = response["result"]["content"][0]["text"]
         self.assertIn("name", error_text.lower())
@@ -230,10 +266,11 @@ class MCPServerTransportTests(unittest.TestCase):
                     with self.subTest(date=bad_date):
                         input_stream = io.BytesIO(
                             (
-                                json.dumps(
+                                _initialize_session()
+                                + json.dumps(
                                     {
                                         "jsonrpc": "2.0",
-                                        "id": 1,
+                                        "id": 2,
                                         "method": "tools/call",
                                         "params": {
                                             "name": "list_meetings",
@@ -252,7 +289,7 @@ class MCPServerTransportTests(unittest.TestCase):
                             output_stream=output_stream,
                         ).run()
 
-                        response = json.loads(output_stream.getvalue().decode("utf-8").strip())
+                        response = json.loads(output_stream.getvalue().decode("utf-8").splitlines()[-1])
                         self.assertTrue(response["result"]["isError"])
             finally:
                 database.close()
