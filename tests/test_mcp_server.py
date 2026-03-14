@@ -68,7 +68,7 @@ class MCPServerTransportTests(unittest.TestCase):
                         "jsonrpc": "2.0",
                         "id": 1,
                         "method": "initialize",
-                        "params": {"protocolVersion": "2025-03-26"},
+                        "params": {"protocolVersion": "2025-11-25"},
                     }
                 )
                 + "\n"
@@ -85,9 +85,30 @@ class MCPServerTransportTests(unittest.TestCase):
             for line in output_stream.getvalue().decode("utf-8").splitlines()
             if line.strip()
         ]
-        self.assertEqual(responses[0]["result"]["protocolVersion"], "2025-03-26")
+        self.assertEqual(responses[0]["result"]["protocolVersion"], "2025-11-25")
         self.assertIn("tools", responses[1]["result"])
         self.assertGreater(len(responses[1]["result"]["tools"]), 0)
+
+    def test_initialize_falls_back_to_latest_supported_protocol(self) -> None:
+        input_stream = io.BytesIO(
+            (
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {"protocolVersion": "2099-01-01"},
+                    }
+                )
+                + "\n"
+            ).encode("utf-8")
+        )
+        output_stream = io.BytesIO()
+
+        StdioMCPServer(DummyRouter(), input_stream=input_stream, output_stream=output_stream).run()
+
+        response = json.loads(output_stream.getvalue().decode("utf-8").strip())
+        self.assertEqual(response["result"]["protocolVersion"], "2025-11-25")
 
     def test_content_length_protocol_remains_supported(self) -> None:
         request = json.dumps(
