@@ -133,6 +133,46 @@ class MCPServerTransportTests(unittest.TestCase):
         response = json.loads(payload.decode("utf-8"))
         self.assertEqual(response["result"]["protocolVersion"], "2024-11-05")
 
+    def test_invalid_json_returns_parse_error(self) -> None:
+        input_stream = io.BytesIO(b"{\n")
+        output_stream = io.BytesIO()
+
+        StdioMCPServer(DummyRouter(), input_stream=input_stream, output_stream=output_stream).run()
+
+        response = json.loads(output_stream.getvalue().decode("utf-8").strip())
+        self.assertEqual(response["id"], None)
+        self.assertEqual(response["error"]["code"], -32700)
+
+    def test_batch_invalid_entries_return_invalid_request(self) -> None:
+        input_stream = io.BytesIO(
+            (
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "initialize",
+                        "params": {"protocolVersion": "2025-03-26"},
+                    }
+                )
+                + "\n"
+                + json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"})
+                + "\n"
+                + json.dumps([1, {"jsonrpc": "2.0", "id": 2, "method": "ping"}])
+                + "\n"
+            ).encode("utf-8")
+        )
+        output_stream = io.BytesIO()
+
+        StdioMCPServer(DummyRouter(), input_stream=input_stream, output_stream=output_stream).run()
+
+        responses = [
+            json.loads(line)
+            for line in output_stream.getvalue().decode("utf-8").splitlines()
+            if line.strip()
+        ]
+        self.assertEqual(responses[1]["error"]["code"], -32600)
+        self.assertEqual(responses[2]["result"], {})
+
     def test_tool_results_wrap_list_payloads_for_cursor_compatibility(self) -> None:
         input_stream = io.BytesIO(
             (

@@ -157,6 +157,15 @@ SUPPORTED_PROTOCOL_VERSIONS = (
 )
 
 
+class MessageParseError(Exception):
+    """Raised when an incoming JSON-RPC frame cannot be parsed."""
+
+    def __init__(self, code: int = -32700, message: str = "Parse error"):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
 @dataclass(slots=True)
 class ToolRouter:
     config: ArchiveConfig
@@ -245,7 +254,11 @@ class StdioMCPServer:
 
     def run(self) -> None:
         while True:
-            message = self._read_message()
+            try:
+                message = self._read_message()
+            except MessageParseError as exc:
+                self._write_message(_error(None, exc.code, exc.message))
+                continue
             if message is None:
                 return
             responses = self._dispatch_message(message)
@@ -257,7 +270,15 @@ class StdioMCPServer:
 
     def _dispatch_message(self, message: dict[str, Any] | list[Any]) -> list[dict[str, Any] | None]:
         if isinstance(message, list):
-            return [self._handle_message(item) for item in message if isinstance(item, dict)]
+            if not message:
+                return [_error(None, -32600, "Invalid Request")]
+            responses: list[dict[str, Any] | None] = []
+            for item in message:
+                if not isinstance(item, dict):
+                    responses.append(_error(None, -32600, "Invalid Request"))
+                    continue
+                responses.append(self._handle_message(item))
+            return responses
         return [self._handle_message(message)]
 
     def _handle_message(self, message: dict[str, Any]) -> dict[str, Any] | None:
@@ -325,12 +346,21 @@ class StdioMCPServer:
             stripped = line.strip()
             if stripped.startswith((b"{", b"[")):
                 self._transport = "ndjson"
-                return json.loads(stripped.decode("utf-8"))
-            headers = self._read_headers(line)
-            content_length = int(headers["content-length"])
-            payload = self.input_stream.read(content_length)
+                try:
+                    return json.loads(stripped.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise MessageParseError() from exc
+            try:
+                headers = self._read_headers(line)
+                content_length = int(headers["content-length"])
+                payload = self.input_stream.read(content_length)
+            except (KeyError, ValueError) as exc:
+                raise MessageParseError() from exc
             self._transport = "content-length"
-            return json.loads(payload.decode("utf-8"))
+            try:
+                return json.loads(payload.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise MessageParseError() from exc
 
     def _read_headers(self, first_line: bytes) -> dict[str, str]:
         headers: dict[str, str] = {}
