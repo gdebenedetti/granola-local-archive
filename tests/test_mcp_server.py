@@ -232,8 +232,7 @@ class MCPServerTransportTests(unittest.TestCase):
         self.assertEqual(structured["items"][0]["title"], "Folder 1")
 
 
-    def test_tools_call_without_name_returns_error(self) -> None:
-        """tools/call that omits 'name' must return isError=true with a readable message."""
+    def test_tools_call_without_name_returns_invalid_params(self) -> None:
         input_stream = io.BytesIO(
             (
                 _initialize_session()
@@ -253,9 +252,34 @@ class MCPServerTransportTests(unittest.TestCase):
         StdioMCPServer(DummyRouter(), input_stream=input_stream, output_stream=output_stream).run()
 
         response = json.loads(output_stream.getvalue().decode("utf-8").splitlines()[-1])
-        self.assertTrue(response["result"]["isError"])
-        error_text = response["result"]["content"][0]["text"]
-        self.assertIn("name", error_text.lower())
+        self.assertEqual(response["error"]["code"], -32602)
+
+    def test_unknown_tool_returns_invalid_params(self) -> None:
+        with tempfile.TemporaryDirectory() as project_root, tempfile.TemporaryDirectory() as granola_root:
+            router, database = _build_tool_router(Path(project_root), Path(granola_root))
+            try:
+                input_stream = io.BytesIO(
+                    (
+                        _initialize_session()
+                        + json.dumps(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": 2,
+                                "method": "tools/call",
+                                "params": {"name": "missing_tool", "arguments": {}},
+                            }
+                        )
+                        + "\n"
+                    ).encode("utf-8")
+                )
+                output_stream = io.BytesIO()
+
+                StdioMCPServer(router, input_stream=input_stream, output_stream=output_stream).run()
+
+                response = json.loads(output_stream.getvalue().decode("utf-8").splitlines()[-1])
+                self.assertEqual(response["error"]["code"], -32602)
+            finally:
+                database.close()
 
     def test_invalid_calendar_dates_rejected_via_mcp(self) -> None:
         """Impossible calendar dates must be rejected through the real ToolRouter dispatch path."""
@@ -291,6 +315,76 @@ class MCPServerTransportTests(unittest.TestCase):
 
                         response = json.loads(output_stream.getvalue().decode("utf-8").splitlines()[-1])
                         self.assertTrue(response["result"]["isError"])
+            finally:
+                database.close()
+
+    def test_missing_required_tool_argument_returns_tool_error(self) -> None:
+        with tempfile.TemporaryDirectory() as project_root, tempfile.TemporaryDirectory() as granola_root:
+            router, database = _build_tool_router(Path(project_root), Path(granola_root))
+            try:
+                input_stream = io.BytesIO(
+                    (
+                        _initialize_session()
+                        + json.dumps(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": 2,
+                                "method": "tools/call",
+                                "params": {
+                                    "name": "search_meetings",
+                                    "arguments": {},
+                                },
+                            }
+                        )
+                        + "\n"
+                    ).encode("utf-8")
+                )
+                output_stream = io.BytesIO()
+
+                StdioMCPServer(
+                    router,
+                    input_stream=input_stream,
+                    output_stream=output_stream,
+                ).run()
+
+                response = json.loads(output_stream.getvalue().decode("utf-8").splitlines()[-1])
+                self.assertTrue(response["result"]["isError"])
+                self.assertIn("query", response["result"]["content"][0]["text"])
+            finally:
+                database.close()
+
+    def test_boolean_arguments_are_not_coerced_from_strings(self) -> None:
+        with tempfile.TemporaryDirectory() as project_root, tempfile.TemporaryDirectory() as granola_root:
+            router, database = _build_tool_router(Path(project_root), Path(granola_root))
+            try:
+                input_stream = io.BytesIO(
+                    (
+                        _initialize_session()
+                        + json.dumps(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": 2,
+                                "method": "tools/call",
+                                "params": {
+                                    "name": "get_meeting_transcript",
+                                    "arguments": {"meeting_id": "meeting-a", "full": "false"},
+                                },
+                            }
+                        )
+                        + "\n"
+                    ).encode("utf-8")
+                )
+                output_stream = io.BytesIO()
+
+                StdioMCPServer(
+                    router,
+                    input_stream=input_stream,
+                    output_stream=output_stream,
+                ).run()
+
+                response = json.loads(output_stream.getvalue().decode("utf-8").splitlines()[-1])
+                self.assertTrue(response["result"]["isError"])
+                self.assertIn("boolean", response["result"]["content"][0]["text"])
             finally:
                 database.close()
 

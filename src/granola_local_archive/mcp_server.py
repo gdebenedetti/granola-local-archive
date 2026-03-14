@@ -166,23 +166,34 @@ class MessageParseError(Exception):
         self.message = message
 
 
+class UnknownToolError(Exception):
+    """Raised when a client requests a tool that is not defined by this server."""
+
+
+class ToolArgumentError(ValueError):
+    """Raised when tool arguments fail the published input schema."""
+
+
+TOOL_SCHEMAS = {tool["name"]: tool.get("inputSchema", {}) for tool in TOOLS}
+
+
 @dataclass(slots=True)
 class ToolRouter:
     config: ArchiveConfig
     database: ArchiveDatabase
 
     def call_tool(self, name: str, arguments: dict[str, Any] | None) -> Any:
-        arguments = arguments or {}
+        arguments = _validate_tool_arguments(name, arguments or {})
         if name == "search_meetings":
             _validate_date(arguments.get("date_from"), "date_from")
             _validate_date(arguments.get("date_to"), "date_to")
             return self.database.search_meetings(
-                query=arguments.get("query", ""),
+                query=arguments["query"],
                 folder=arguments.get("folder"),
                 date_from=arguments.get("date_from"),
                 date_to=arguments.get("date_to"),
                 has_transcript=arguments.get("has_transcript"),
-                limit=int(arguments.get("limit", 10)),
+                limit=arguments.get("limit", 10),
             )
         if name == "list_meetings":
             _validate_date(arguments.get("date_from"), "date_from")
@@ -192,14 +203,14 @@ class ToolRouter:
                 date_from=arguments.get("date_from"),
                 date_to=arguments.get("date_to"),
                 has_transcript=arguments.get("has_transcript"),
-                limit=int(arguments.get("limit", 25)),
+                limit=arguments.get("limit", 25),
             )
         if name == "get_meeting":
             return self.database.get_meeting(arguments["meeting_id"])
         if name == "get_meeting_transcript":
             return self.database.get_meeting_transcript(
                 arguments["meeting_id"],
-                full=bool(arguments.get("full", False)),
+                full=arguments.get("full", False),
             )
         if name == "list_folders":
             return self.database.list_folders()
@@ -214,7 +225,7 @@ class ToolRouter:
                 date_from=arguments.get("date_from"),
                 date_to=arguments.get("date_to"),
                 has_transcript=arguments.get("has_transcript"),
-                limit=int(arguments.get("limit", 10)),
+                limit=arguments.get("limit", 10),
             )
         if name == "search_evidence":
             _validate_date(arguments.get("date_from"), "date_from")
@@ -225,18 +236,18 @@ class ToolRouter:
                 folder=arguments.get("folder"),
                 date_from=arguments.get("date_from"),
                 date_to=arguments.get("date_to"),
-                limit=int(arguments.get("limit", 10)),
+                limit=arguments.get("limit", 10),
             )
         if name == "search_unlisted":
             return self.database.search_unlisted(
                 arguments["query"],
-                limit=int(arguments.get("limit", 10)),
+                limit=arguments.get("limit", 10),
             )
         if name == "get_folder_attachments":
             return self.database.get_folder_attachments(arguments["folder_id_or_title"])
         if name == "stats":
             return self.database.stats(manifest=load_manifest(self.config))
-        raise KeyError(f"unknown tool {name}")
+        raise UnknownToolError(f"unknown tool {name}")
 
 
 class StdioMCPServer:
@@ -288,7 +299,15 @@ class StdioMCPServer:
     def _handle_message(self, message: dict[str, Any]) -> dict[str, Any] | None:
         method = message.get("method")
         message_id = message.get("id")
-        params = message.get("params") or {}
+        raw_params = message.get("params")
+        if raw_params is None:
+            params: dict[str, Any] = {}
+        elif isinstance(raw_params, dict):
+            params = raw_params
+        else:
+            if message_id is None:
+                return None
+            return _error(message_id, -32602, "Invalid params")
 
         if method == "initialize":
             if self._protocol_version is not None:
@@ -341,14 +360,18 @@ class StdioMCPServer:
             return _result(message_id, {"resourceTemplates": []})
         if method == "tools/call":
             tool_name = params.get("name")
-            if not tool_name:
-                return _result(
-                    message_id,
-                    _tool_payload({"error": "tools/call requires a 'name' parameter"}, is_error=True),
-                )
+            if not isinstance(tool_name, str) or not tool_name:
+                return _error(message_id, -32602, "Invalid params")
+            arguments = params.get("arguments")
+            if arguments is None:
+                arguments = {}
+            elif not isinstance(arguments, dict):
+                return _error(message_id, -32602, "Invalid params")
             try:
-                payload = self.router.call_tool(tool_name, params.get("arguments"))
+                payload = self.router.call_tool(tool_name, arguments)
                 return _result(message_id, _tool_payload(payload))
+            except UnknownToolError as exc:
+                return _error(message_id, -32602, str(exc))
             except Exception as exc:
                 return _result(message_id, _tool_payload({"error": str(exc)}, is_error=True))
         if message_id is None:
@@ -436,3 +459,40 @@ def _negotiate_protocol_version(requested_version: str | None) -> str:
     if requested_version in SUPPORTED_PROTOCOL_VERSIONS:
         return str(requested_version)
     return SUPPORTED_PROTOCOL_VERSIONS[0]
+
+
+def _validate_tool_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    schema = TOOL_SCHEMAS.get(name)
+    if schema is None:
+        raise UnknownToolError(f"unknown tool {name}")
+
+    properties = schema.get("properties", {})
+    required = schema.get("required", [])
+
+    for field_name in required:
+        if field_name not in arguments:
+            raise ToolArgumentError(f"{name} requires a {field_name!r} argument")
+
+    for field_name, value in arguments.items():
+        property_schema = properties.get(field_name)
+        if property_schema is None or value is None:
+            continue
+        field_type = property_schema.get("type")
+        if field_type == "string":
+            if not isinstance(value, str):
+                raise ToolArgumentError(f"{field_name} must be a string")
+            continue
+        if field_type == "boolean":
+            if not isinstance(value, bool):
+                raise ToolArgumentError(f"{field_name} must be a boolean")
+            continue
+        if field_type == "integer":
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ToolArgumentError(f"{field_name} must be an integer")
+            maximum = property_schema.get("maximum")
+            if maximum is not None and value > maximum:
+                raise ToolArgumentError(f"{field_name} must be <= {maximum}")
+            minimum = property_schema.get("minimum")
+            if minimum is not None and value < minimum:
+                raise ToolArgumentError(f"{field_name} must be >= {minimum}")
+    return arguments
